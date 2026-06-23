@@ -13,10 +13,10 @@
   <img alt="Status: early" src="https://img.shields.io/badge/status-early-orange">
 </p>
 
-<!-- TODO: drop a hero screenshot/GIF at docs/hero.png and uncomment:
-<p align="center"><img src="docs/hero.png" alt="Roost workspace" width="900"></p>
--->
-<p align="center"><em>screenshot coming soon — the default 2×2: Agent · Shell · Git · Scratchpad</em></p>
+<p align="center">
+  <img src="docs/hero.png" alt="Roost workspace — Agent, Git, Shell, and Scratchpad panes" width="760">
+</p>
+<p align="center"><sub>The default 2×2: Agent (Claude Code) · Git (lazygit) · Shell · Scratchpad</sub></p>
 
 ---
 
