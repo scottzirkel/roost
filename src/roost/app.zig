@@ -701,8 +701,8 @@ fn presentFolderPicker(app_ctx: *AppContext) void {
     );
 }
 
-/// `gio.AsyncReadyCallback` for `FileDialog.selectFolder`. Opens the chosen
-/// folder in a new window (matching the chooser default). Cancel / error => no-op.
+/// `gio.AsyncReadyCallback` for `FileDialog.selectFolder`. Switches THIS window to
+/// the chosen folder (matching the chooser default). Cancel / error => no-op.
 fn onFolderChosen(
     source: ?*gobject.Object,
     res: *gio.AsyncResult,
@@ -727,7 +727,7 @@ fn onFolderChosen(
     };
     defer glib.free(path);
 
-    openProjectNewWindow(app_ctx, std.mem.span(path));
+    rebuildWorkspace(app_ctx, std.mem.span(path));
 }
 
 /// Tear down the live workspace and build a fresh one rooted at `new_path`.
@@ -1038,8 +1038,8 @@ fn presentChooser(a: *AppContext) void {
     // activation immediately; onChooserRow guards against that by time.
     const list_box = gtk.ListBox.new();
     list_box.setSelectionMode(.single);
-    // Single-click SELECTS (so "Switch This Window" can act on the selection);
-    // double-click / Enter activates a row (-> open in a new window).
+    // Single-click SELECTS (so the "New Window" response can act on the
+    // selection); double-click / Enter activates a row (-> switch THIS window).
     list_box.setActivateOnSingleClick(0);
     for (owned) |p| {
         const label = gtk.Label.new(p.ptr);
@@ -1058,10 +1058,10 @@ fn presentChooser(a: *AppContext) void {
 
     const dialog = adw.AlertDialog.new(
         "Open Project",
-        "Double-click to open in a new window. Select a row, then Switch to replace this window.",
+        "Double-click or Enter opens in this window. Select a row, then New Window to open it separately.",
     );
     dialog.setExtraChild(scroller.as(gtk.Widget));
-    dialog.addResponse("switch", "Switch This Window");
+    dialog.addResponse("newwin", "New Window");
     dialog.addResponse("open", "Open Folder…");
     dialog.addResponse("new", "New Worktree…");
     dialog.addResponse("cancel", "Cancel");
@@ -1085,9 +1085,9 @@ fn pathListContains(haystack: []const [:0]u8, needle: []const u8) bool {
     return false;
 }
 
-/// A chooser row was activated (double-click / Enter): open that project in a
-/// NEW window, then close the dialog (the close fires `onChooserResponse`, which
-/// frees the state).
+/// A chooser row was activated (double-click / Enter): switch THIS window to that
+/// project, then close the dialog (the close fires `onChooserResponse`, which
+/// frees the state). Opening in a NEW window is the explicit "New Window" response.
 fn onChooserRow(_: *gtk.ListBox, row: *gtk.ListBoxRow, st: *ChooserState) callconv(.c) void {
     const idx = row.getIndex();
     if (idx < 0) return;
@@ -1099,14 +1099,14 @@ fn onChooserRow(_: *gtk.ListBox, row: *gtk.ListBoxRow, st: *ChooserState) callco
         log.debug("ignoring early (phantom) chooser row activation idx={d}", .{i});
         return;
     }
-    // Default action: open the picked project in a NEW window (keeps this one).
-    openProjectNewWindow(st.app_ctx, st.paths[i]);
+    // Default action: replace THIS window with the picked project.
+    rebuildWorkspace(st.app_ctx, st.paths[i]);
     _ = st.dialog.as(adw.Dialog).close();
 }
 
 /// `chooseFinish` callback for the chooser. Dispatches the footer actions
-/// ("open"/"new"); row activations close with the close-response and were already
-/// handled in `onChooserRow`. Always frees the chooser state.
+/// ("newwin"/"open"/"new"); row activations close with the close-response and were
+/// already handled in `onChooserRow`. Always frees the chooser state.
 fn onChooserResponse(
     source: ?*gobject.Object,
     res: *gio.AsyncResult,
@@ -1122,12 +1122,12 @@ fn onChooserResponse(
 
     const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
     const resp = dialog.chooseFinish(res);
-    if (std.mem.orderZ(u8, "switch", resp) == .eq) {
-        // Replace THIS window with the currently-selected row's project.
+    if (std.mem.orderZ(u8, "newwin", resp) == .eq) {
+        // Open the currently-selected row's project in a NEW window.
         if (st.list_box.getSelectedRow()) |row| {
             const idx = row.getIndex();
             if (idx >= 0 and @as(usize, @intCast(idx)) < st.paths.len) {
-                rebuildWorkspace(a, st.paths[@intCast(idx)]);
+                openProjectNewWindow(a, st.paths[@intCast(idx)]);
             }
         }
     } else if (std.mem.orderZ(u8, "open", resp) == .eq) {
