@@ -23,7 +23,7 @@ and exits 0 — it can never break your agent.
 1. Make the helper executable (once):
 
    ```sh
-   chmod +x /home/scott/projects/myterm/scripts/roost-notify
+   chmod +x /home/scott/projects/roost/scripts/roost-notify
    ```
 
 2. Merge the `hooks` block from `claude-hooks.json` into your
@@ -33,7 +33,7 @@ and exits 0 — it can never break your agent.
    - If you already have a `hooks` key, merge by event: append our `Stop` and
      `Notification` entries into your existing arrays for those events.
    - Replace `/ABSOLUTE/PATH/TO/scripts` with the real absolute path, e.g.
-     `/home/scott/projects/myterm/scripts`.
+     `/home/scott/projects/roost/scripts`.
 
    A minimal merged result looks like:
 
@@ -41,10 +41,10 @@ and exits 0 — it can never break your agent.
    {
      "hooks": {
        "Stop": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/myterm/scripts/roost-notify done" } ] }
+         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify done" } ] }
        ],
        "Notification": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/myterm/scripts/roost-notify needs-input" } ] }
+         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify needs-input" } ] }
        ]
      }
    }

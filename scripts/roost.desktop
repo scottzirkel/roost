@@ -10,7 +10,7 @@ Comment=Agent command center (Ghostty soft-fork)
 # the flag and stay independent windows. Adjust the path if the binary moves.
 # (The app id dev.scottzirkel.Roost is forced in-process via injectAppId; no
 # --class flag is needed here.)
-Exec=/home/scott/projects/myterm/vendor/ghostty/zig-out/bin/roost --gtk-single-instance=true
+Exec=/home/scott/projects/roost/vendor/ghostty/zig-out/bin/roost --gtk-single-instance=true
 Terminal=false
 Categories=Development;Utility;
 Icon=dev.scottzirkel.Roost

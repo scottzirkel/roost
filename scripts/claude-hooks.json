@@ -1,6 +1,6 @@
 {
   "//": "Roost <-> Claude Code hook wiring. This is a DOCUMENTED SNIPPET, not a file Roost applies for you. Merge the `hooks` block below into your ~/.claude/settings.json. See scripts/README.md for merge instructions.",
-  "//path": "Replace /ABSOLUTE/PATH/TO with the absolute path to this repo's scripts/ dir, e.g. /home/scott/projects/myterm/scripts. The script reads $ROOST_SOCK (exported by Roost into every pane, including the Agent pane that runs `claude`).",
+  "//path": "Replace /ABSOLUTE/PATH/TO with the absolute path to this repo's scripts/ dir, e.g. /home/scott/projects/roost/scripts. The script reads $ROOST_SOCK (exported by Roost into every pane, including the Agent pane that runs `claude`).",
 
   "hooks": {
     "Stop": [
