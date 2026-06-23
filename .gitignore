@@ -1,0 +1,11 @@
+# Build output (lives inside the submodule, but ignore at root too just in case)
+zig-out/
+.zig-cache/
+*.o
+
+# Editor / OS cruft
+.DS_Store
+
+# Internal / local-only (not for the public repo)
+HANDOFF.md
+.claude/settings.local.json

@@ -1,0 +1,32 @@
+diff --git a/build.zig b/build.zig
+index f9d861b..d08ff1a 100644
+--- a/build.zig
++++ b/build.zig
+@@ -62,6 +62,27 @@ pub fn build(b: *std.Build) !void {
+     // Ghostty executable, the actual runnable Ghostty program.
+     const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);
+ 
++    // --- roost (ADDITIVE) -------------------------------------------------
++    // A standalone executable that embeds real Ghostty Surfaces into our own
++    // GTK window, arranged as a role-aware 4-pane workspace. All roost code
++    // lives under src/roost/ (+ this thin src/main_roost.zig entry). We reuse
++    // SharedDeps.add to wire all imports/libs/GResources.
++    {
++        const roost = b.addExecutable(.{
++            .name = "roost",
++            .root_module = b.createModule(.{
++                .root_source_file = b.path("src/main_roost.zig"),
++                .target = config.target,
++                .optimize = config.optimize,
++            }),
++            .use_llvm = true,
++        });
++        _ = try deps.add(roost);
++        const roost_step = b.step("roost", "Build the roost 4-pane workspace");
++        roost_step.dependOn(&b.addInstallArtifact(roost, .{}).step);
++    }
++    // --- end roost --------------------------------------------------------
++
+     // Ghostty docs
+     const docs = try buildpkg.GhosttyDocs.init(b, &deps);
+     if (config.emit_docs) {

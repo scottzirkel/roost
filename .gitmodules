@@ -1,0 +1,6 @@
+[submodule "vendor/ghostty"]
+	path = vendor/ghostty
+	url = https://github.com/ghostty-org/ghostty.git
+	# Pinned to a vanilla upstream tag; our code overlays on top at build time
+	# (see build.sh), so the working tree is intentionally dirty after a build.
+	ignore = dirty

@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""roost-notify: tell the roost window what the agent is doing.
+
+Connects to the Unix-domain socket in $ROOST_SOCK and writes a single
+line whose first whitespace-separated token is the EVENT and whose
+remainder is an optional human-readable message:
+
+    roost-notify done
+    roost-notify needs-input "Approve this edit?"
+    roost-notify working
+
+Recognized events (anything else is ignored by roost): done | needs-input | working
+
+This is meant to be wired into Claude Code hooks. Claude Code passes the hook
+payload as JSON on stdin; we read and ignore it (we only care about argv), but
+if NO message argument was given we try to lift a useful one out of that JSON
+(the "message" field, as the Notification hook provides).
+
+DESIGN RULE: a missing/broken socket must NEVER break the user's agent. Every
+failure path is swallowed silently and we always exit 0.
+"""
+
+import json
+import os
+import socket
+import sys
+
+
+def main() -> int:
+    sock_path = os.environ.get("ROOST_SOCK")
+    if not sock_path:
+        # Not running under roost (or socket not exported); nothing to do.
+        return 0
+
+    event = sys.argv[1] if len(sys.argv) > 1 else "working"
+    message = " ".join(sys.argv[2:]).strip()
+
+    # Drain stdin (Claude Code sends a JSON hook payload). If we weren't given
+    # an explicit message, try to recover one from the payload.
+    stdin_data = ""
+    try:
+        if not sys.stdin.isatty():
+            stdin_data = sys.stdin.read()
+    except Exception:
+        stdin_data = ""
+
+    if not message and stdin_data:
+        try:
+            payload = json.loads(stdin_data)
+            if isinstance(payload, dict):
+                message = str(payload.get("message", "")).strip()
+        except Exception:
+            message = ""
+
+    line = event if not message else f"{event} {message}"
+    # Keep it to one line; the receiver reads a single short message.
+    line = line.replace("\n", " ").replace("\r", " ")
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(sock_path)
+        s.sendall(line.encode("utf-8", "replace"))
+        s.close()
+    except Exception:
+        # Socket gone / roost not running / anything else: stay silent.
+        pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # Belt and suspenders: never propagate a failure to the agent.
+        sys.exit(0)
