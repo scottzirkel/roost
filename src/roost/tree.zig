@@ -747,6 +747,43 @@ pub const Tree = struct {
         self.focusNode(new_leaf);
     }
 
+    /// Resize the focused pane by nudging the nearest ancestor divider on `dir`'s
+    /// axis IN the arrow's direction: Down/Right move the divider down/right
+    /// (increase the paned position), Up/Left move it up/left. This is
+    /// independent of which side the focused pane sits on — so e.g. Up always
+    /// moves the divider up, growing a bottom pane and shrinking a top one, which
+    /// is what "press the arrow to push the boundary that way" feels like. No-op
+    /// if the focused pane already spans that axis (no ancestor split of that
+    /// orientation). `setPosition` marks the divider user-set, so it persists.
+    pub fn resizeFocused(self: *Tree, dir: Direction) void {
+        const orientation: gtk.Orientation = switch (dir) {
+            .left, .right => .horizontal,
+            .up, .down => .vertical,
+        };
+        const increase = switch (dir) { // move the divider toward the end (down/right)
+            .right, .down => true,
+            .left, .up => false,
+        };
+        var child = self.focused;
+        if (child.* != .leaf) return;
+        var parent = parentOf(self.root, child);
+        while (parent) |p| {
+            if (p.split.orientation == orientation) {
+                const paned = p.split.paned;
+                const max = panedIntProp(paned, "max-position");
+                if (max <= 0) return;
+                // Proportional step keeps the feel consistent across monitor sizes.
+                const step: c_int = @max(@as(c_int, 24), @divTrunc(max, 10));
+                const delta: c_int = if (increase) step else -step;
+                paned.setPosition(std.math.clamp(paned.getPosition() + delta, 0, max));
+                return;
+            }
+            child = p;
+            parent = parentOf(self.root, p);
+        }
+        // No ancestor split of that orientation: the pane spans the axis already.
+    }
+
     /// Close the focused leaf. Its sibling collapses up to replace the parent
     /// split. Returns `.closed_last` if this was the LAST pane (caller should
     /// quit), else `.collapsed`. Focus moves to a neighboring leaf.

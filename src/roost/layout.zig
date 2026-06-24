@@ -170,6 +170,13 @@ pub const Workspace = struct {
         };
     }
 
+    /// Resize the focused pane by nudging the nearest divider in `dir`'s
+    /// direction (keyboard resize).
+    pub fn resizePane(self: *Workspace, dir: Direction) void {
+        if (self.window) |w| self.t.syncFocusFromWindow(w);
+        self.t.resizeFocused(dir);
+    }
+
     /// Add a new pane in the given role by splitting the focused leaf. We split
     /// vertically (new pane below) by default; the user can re-split as needed.
     /// "Add a pane by role" reuses the split machinery so the new pane lands in

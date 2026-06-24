@@ -499,6 +499,13 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 //     Ctrl+Alt+Left/Right/Up/Down   directional focus (spatial, Hyprland-style)
 //     Ctrl+Shift+Alt+Left/Right/Up/Down  swap focused pane with that neighbor
 //                               (focus follows the moved pane)
+//     Ctrl+Shift+Left/Right/Up/Down  resize focused pane by nudging the nearest
+//                               same-orientation divider IN the arrow direction
+//                               (Up grows a bottom pane / shrinks a top one);
+//                               no-op if the pane spans that axis. Not persisted
+//                               per-keystroke (like a manual divider drag).
+//     NOTE: every directional binding above also accepts vim hjkl in place of
+//     the arrow (h=Left, j=Down, k=Up, l=Right), same modifiers.
 //
 //   Tree ops:
 //     Ctrl+Shift+R              split focused pane horizontally (new pane to
@@ -576,6 +583,12 @@ fn setupShortcuts(
     addAction(map, "swap-up", onSwapUp, app_ctx);
     addAction(map, "swap-down", onSwapDown, app_ctx);
 
+    // Resize the focused pane: Ctrl+Shift+Arrow (mini-Hyprland keymap).
+    addAction(map, "resize-left", onResizeLeft, app_ctx);
+    addAction(map, "resize-right", onResizeRight, app_ctx);
+    addAction(map, "resize-up", onResizeUp, app_ctx);
+    addAction(map, "resize-down", onResizeDown, app_ctx);
+
     // Splits + close.
     addAction(map, "split-h", onSplitH, app_ctx);
     addAction(map, "split-v", onSplitV, app_ctx);
@@ -614,14 +627,21 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.focus-7", "<Alt>7");
     setAccel(gtk_app, "win.focus-8", "<Alt>8");
     setAccel(gtk_app, "win.focus-9", "<Alt>9");
-    setAccel(gtk_app, "win.focus-left", "<Ctrl><Alt>Left");
-    setAccel(gtk_app, "win.focus-right", "<Ctrl><Alt>Right");
-    setAccel(gtk_app, "win.focus-up", "<Ctrl><Alt>Up");
-    setAccel(gtk_app, "win.focus-down", "<Ctrl><Alt>Down");
-    setAccel(gtk_app, "win.swap-left", "<Ctrl><Shift><Alt>Left");
-    setAccel(gtk_app, "win.swap-right", "<Ctrl><Shift><Alt>Right");
-    setAccel(gtk_app, "win.swap-up", "<Ctrl><Shift><Alt>Up");
-    setAccel(gtk_app, "win.swap-down", "<Ctrl><Shift><Alt>Down");
+    // Directional ops each get an arrow + its vim hjkl alias (h=left, j=down,
+    // k=up, l=right). No-shift combos use lowercase letters; shift combos use
+    // uppercase (matching the keyval that arrives when Shift is held).
+    setAccel2(gtk_app, "win.focus-left", "<Ctrl><Alt>Left", "<Ctrl><Alt>h");
+    setAccel2(gtk_app, "win.focus-right", "<Ctrl><Alt>Right", "<Ctrl><Alt>l");
+    setAccel2(gtk_app, "win.focus-up", "<Ctrl><Alt>Up", "<Ctrl><Alt>k");
+    setAccel2(gtk_app, "win.focus-down", "<Ctrl><Alt>Down", "<Ctrl><Alt>j");
+    setAccel2(gtk_app, "win.swap-left", "<Ctrl><Shift><Alt>Left", "<Ctrl><Shift><Alt>H");
+    setAccel2(gtk_app, "win.swap-right", "<Ctrl><Shift><Alt>Right", "<Ctrl><Shift><Alt>L");
+    setAccel2(gtk_app, "win.swap-up", "<Ctrl><Shift><Alt>Up", "<Ctrl><Shift><Alt>K");
+    setAccel2(gtk_app, "win.swap-down", "<Ctrl><Shift><Alt>Down", "<Ctrl><Shift><Alt>J");
+    setAccel2(gtk_app, "win.resize-left", "<Ctrl><Shift>Left", "<Ctrl><Shift>H");
+    setAccel2(gtk_app, "win.resize-right", "<Ctrl><Shift>Right", "<Ctrl><Shift>L");
+    setAccel2(gtk_app, "win.resize-up", "<Ctrl><Shift>Up", "<Ctrl><Shift>K");
+    setAccel2(gtk_app, "win.resize-down", "<Ctrl><Shift>Down", "<Ctrl><Shift>J");
     setAccel(gtk_app, "win.split-h", "<Ctrl><Shift>R");
     setAccel(gtk_app, "win.split-v", "<Ctrl><Shift>D");
     setAccel(gtk_app, "win.split-group-h", "<Ctrl><Shift><Alt>R");
@@ -659,6 +679,14 @@ fn addAction(
 /// Bind a single accelerator string to a detailed action name.
 fn setAccel(gtk_app: *gtk.Application, action: [:0]const u8, accel: [*:0]const u8) void {
     const accels = [_:null]?[*:0]const u8{accel};
+    gtk_app.setAccelsForAction(action, &accels);
+}
+
+/// Bind two accelerators to one action (an arrow key + its vim hjkl alias). GTK
+/// matches either. Shift-bearing combos use the uppercase letter (e.g. `<Shift>H`),
+/// no-shift combos use lowercase (`h`), mirroring how the keyval arrives.
+fn setAccel2(gtk_app: *gtk.Application, action: [:0]const u8, a1: [*:0]const u8, a2: [*:0]const u8) void {
+    const accels = [_:null]?[*:0]const u8{ a1, a2 };
     gtk_app.setAccelsForAction(action, &accels);
 }
 
@@ -724,6 +752,22 @@ fn onSwapUp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
 fn onSwapDown(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.swapPane(.down);
     saveLayout(a);
+}
+
+// Resize the focused pane (Ctrl+Shift+Arrow). Like a manual divider drag, we do
+// NOT persist per-keystroke (it would write the layout file on every key-repeat
+// tick); the live position is captured on the next save / clean window close.
+fn onResizeLeft(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.resizePane(.left);
+}
+fn onResizeRight(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.resizePane(.right);
+}
+fn onResizeUp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.resizePane(.up);
+}
+fn onResizeDown(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.resizePane(.down);
 }
 
 // --- Structural handlers ---------------------------------------------------
