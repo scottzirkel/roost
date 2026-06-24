@@ -546,6 +546,8 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 //                               (Switch / Open in New Window / Cancel)
 //     Ctrl+Q                    quit (confirms first, Quit is the default so
 //                               Enter quits; saves layout)
+//     Ctrl+Shift+/  (Ctrl+?)    show the keyboard cheat-sheet (this list, as a
+//                               modal grouped by section)
 //
 // Collision notes: Ctrl+Shift+{R,D,A,S,G,E,N,W,B} and Ctrl+Alt+arrows avoid the
 // common shell/vim/lazygit single-key and Ctrl-only bindings. Ctrl+W is the
@@ -617,6 +619,9 @@ fn setupShortcuts(
     // Cross-pane: send scratchpad text to the agent (Ctrl+Return).
     addAction(map, "send-to-agent", onSendToAgent, app_ctx);
 
+    // Keyboard cheat-sheet (Ctrl+?).
+    addAction(map, "show-help", onShowHelp, app_ctx);
+
     // Accelerators.
     setAccel(gtk_app, "win.focus-1", "<Alt>1");
     setAccel(gtk_app, "win.focus-2", "<Alt>2");
@@ -656,6 +661,7 @@ fn setupShortcuts(
     setAccel(gtk_app, "app.present-chooser", "<Ctrl>o");
     setAccel(gtk_app, "win.create-worktree", "<Ctrl><Shift>b");
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
+    setAccel(gtk_app, "win.show-help", "<Ctrl>question");
 
     // Quit: Ctrl+Q reuses the existing `win.close` action (clean shutdown +
     // layout save, both via onWindowCloseRequest).
@@ -1232,6 +1238,96 @@ fn onConfirmResponse(
     const response = dialog.chooseFinish(res);
     if (std.mem.orderZ(u8, "accept", response) != .eq) return;
     on_confirm(a);
+}
+
+// --- Keyboard cheat-sheet --------------------------------------------------
+
+/// One line of the cheat-sheet. A null `keys` marks a section header (its
+/// `text` is the heading); otherwise it's a `keys` → `text` shortcut row.
+const HelpRow = struct {
+    keys: ?[:0]const u8 = null,
+    text: [:0]const u8,
+};
+
+const help_rows = [_]HelpRow{
+    .{ .text = "Focus" },
+    .{ .keys = "Alt+1 … Alt+9", .text = "Focus pane N by position" },
+    .{ .keys = "Ctrl+Alt+←↓↑→  ·  hjkl", .text = "Focus pane in a direction" },
+    .{ .text = "Move & resize" },
+    .{ .keys = "Ctrl+Shift+Alt+←↓↑→  ·  HJKL", .text = "Swap pane with that neighbor" },
+    .{ .keys = "Ctrl+Shift+←↓↑→  ·  HJKL", .text = "Resize focused pane (push divider)" },
+    .{ .text = "Split & arrange" },
+    .{ .keys = "Ctrl+Shift+R  /  D", .text = "Split pane → right / down" },
+    .{ .keys = "Ctrl+Shift+Alt+R  /  D", .text = "Split whole column / row as a unit" },
+    .{ .keys = "Ctrl+Shift+A S G E N", .text = "Add Agent / Shell / Git / Editor / Notes" },
+    .{ .keys = "Ctrl+W", .text = "Close focused pane" },
+    .{ .keys = "Ctrl+Alt+R", .text = "Reset layout to default 2×2" },
+    .{ .text = "Project & worktree" },
+    .{ .keys = "Ctrl+O", .text = "Open project / worktree chooser" },
+    .{ .keys = "Ctrl+Shift+B", .text = "New branch + worktree" },
+    .{ .text = "Other" },
+    .{ .keys = "Ctrl+Enter", .text = "Send scratchpad selection → agent" },
+    .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
+    .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
+};
+
+/// `win.show-help` (Ctrl+Shift+/): a modal cheat-sheet of every keybinding,
+/// grouped by section. Built fresh each time; closes on Esc or the Close button.
+fn presentShortcuts(a: *AppContext) void {
+    const grid = gtk.Grid.new();
+    grid.setRowSpacing(6);
+    grid.setColumnSpacing(28);
+    const gw = grid.as(gtk.Widget);
+    gw.setMarginTop(4);
+    gw.setMarginBottom(4);
+    gw.setMarginStart(4);
+    gw.setMarginEnd(4);
+
+    var r: c_int = 0;
+    for (help_rows) |row| {
+        if (row.keys) |keys| {
+            var buf: [256]u8 = undefined;
+            const markup = std.fmt.bufPrintZ(&buf, "<tt>{s}</tt>", .{keys}) catch keys;
+            const kl = gtk.Label.new(null);
+            kl.setMarkup(markup);
+            kl.setXalign(0.0);
+            kl.as(gtk.Widget).setHalign(.start);
+            grid.attach(kl.as(gtk.Widget), 0, r, 1, 1);
+
+            const dl = gtk.Label.new(row.text);
+            dl.setXalign(0.0);
+            dl.as(gtk.Widget).setHalign(.start);
+            grid.attach(dl.as(gtk.Widget), 1, r, 1, 1);
+        } else {
+            var buf: [128]u8 = undefined;
+            const markup = std.fmt.bufPrintZ(&buf, "<b>{s}</b>", .{row.text}) catch row.text;
+            const hl = gtk.Label.new(null);
+            hl.setMarkup(markup);
+            hl.setXalign(0.0);
+            hl.as(gtk.Widget).setHalign(.start);
+            if (r != 0) hl.as(gtk.Widget).setMarginTop(10);
+            grid.attach(hl.as(gtk.Widget), 0, r, 2, 1);
+        }
+        r += 1;
+    }
+
+    const scroller = gtk.ScrolledWindow.new();
+    scroller.setPolicy(.never, .automatic);
+    scroller.setMaxContentHeight(560);
+    scroller.setPropagateNaturalHeight(1);
+    scroller.setPropagateNaturalWidth(1);
+    scroller.setChild(grid.as(gtk.Widget));
+
+    const dialog = adw.AlertDialog.new("Keyboard Shortcuts", null);
+    dialog.setExtraChild(scroller.as(gtk.Widget));
+    dialog.addResponse("close", "Close");
+    dialog.setDefaultResponse("close");
+    dialog.setCloseResponse("close");
+    dialog.choose(a.window.as(gtk.Widget), null, null, null);
+}
+
+fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    presentShortcuts(a);
 }
 
 /// Show a simple modal error alert with a single OK button. Best-effort: a
