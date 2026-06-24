@@ -17,11 +17,11 @@ ZIG_REAL=$(readlink -f "$(command -v zig)")
 FILE="$(dirname "$ZIG_REAL")/lib/std/Build/Step/Compile.zig"
 [ -f "$FILE" ] || { echo "error: $FILE not found" >&2; exit 1; }
 
-if ! grep -q "myterm: force LLVM" "$FILE"; then
-  sed -i 's|\.use_llvm = options\.use_llvm,|.use_llvm = options.use_llvm orelse true, // myterm: force LLVM (Zig #31272)|' "$FILE"
+if ! grep -q "roost: force LLVM" "$FILE"; then
+  sed -i 's|\.use_llvm = options\.use_llvm,|.use_llvm = options.use_llvm orelse true, // roost: force LLVM (Zig #31272)|' "$FILE"
 fi
-if ! grep -q "myterm: force LLD" "$FILE"; then
-  sed -i 's|\.use_lld = options\.use_lld,|.use_lld = options.use_lld orelse true, // myterm: force LLD (Zig #31272 SFrame workaround)|' "$FILE"
+if ! grep -q "roost: force LLD" "$FILE"; then
+  sed -i 's|\.use_lld = options\.use_lld,|.use_lld = options.use_lld orelse true, // roost: force LLD (Zig #31272 SFrame workaround)|' "$FILE"
 fi
 echo "patched: $FILE"
-grep -n "myterm: force" "$FILE"
+grep -n "roost: force" "$FILE"
