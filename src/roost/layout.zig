@@ -121,6 +121,13 @@ pub const Workspace = struct {
         self.t.moveFocus(dir);
     }
 
+    /// Swap the focused pane with the pane in `dir` (Hyprland "move window").
+    /// Sync live focus first so it operates on the pane the user is actually in.
+    pub fn swapPane(self: *Workspace, dir: Direction) void {
+        if (self.window) |w| self.t.syncFocusFromWindow(w);
+        self.t.swapFocused(dir);
+    }
+
     /// Split the focused leaf; the new pane defaults to `shell`.
     pub fn split(self: *Workspace, orientation: gtk.Orientation) void {
         if (self.window) |w| self.t.syncFocusFromWindow(w);

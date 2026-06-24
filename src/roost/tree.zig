@@ -459,24 +459,38 @@ pub const Tree = struct {
         }
     }
 
-    /// Move focus one step in `dir`, Hyprland-style: pick the pane that actually
-    /// lies in that direction on screen, not the next one in tree order. We lay
-    /// the tree out into normalized [0,1]x[0,1] rectangles (using each split's
-    /// LIVE divider ratio, so manual drags are respected), then among the panes
-    /// whose center is past the focused pane's center in `dir`, choose the one
-    /// with the most overlap on the perpendicular axis — tie-broken by nearest.
-    /// This preserves the cross-axis position (e.g. moving right from the
-    /// bottom-left pane lands on the bottom-right pane, not the top-right one).
-    /// No-op if there is no pane in that direction (an edge).
-    pub fn moveFocus(self: *Tree, dir: Direction) void {
+    /// The pane that `dir` points at from the focused pane, Hyprland-style, or
+    /// null at an edge. We lay the tree out into normalized [0,1]x[0,1]
+    /// rectangles (using each split's LIVE divider ratio, so manual drags are
+    /// respected), then among the panes whose center is past the focused pane's
+    /// center in `dir`, choose the one with the most overlap on the perpendicular
+    /// axis — tie-broken by nearest. This preserves the cross-axis position (e.g.
+    /// moving right from the bottom-left pane lands on the bottom-right pane, not
+    /// the top-right one). Shared by `moveFocus` and `swapFocused` so the two
+    /// always agree on "the pane in that direction".
+    fn findInDirection(self: *Tree, dir: Direction) ?*Node {
         const from = self.focused;
-        if (from.* != .leaf) return;
-        const from_rect = rectOf(self.root, from, unit_rect) orelse return;
-
+        if (from.* != .leaf) return null;
+        const from_rect = rectOf(self.root, from, unit_rect) orelse return null;
         var search: FocusSearch = .{ .dir = dir, .from = from_rect, .from_node = from };
         searchDirection(self.root, unit_rect, &search);
-        if (search.best) |b| self.focusNode(b);
-        // else: no pane in that direction — stay put.
+        return search.best;
+    }
+
+    /// Move focus one step in `dir`. No-op at an edge (nothing in that direction).
+    pub fn moveFocus(self: *Tree, dir: Direction) void {
+        if (self.findInDirection(dir)) |target| self.focusNode(target);
+    }
+
+    /// Swap the focused pane with the pane in `dir` (the same one `moveFocus`
+    /// would land on), then keep focus on the moved pane so it travels with you
+    /// — exactly like Hyprland's "move window". No-op at an edge.
+    pub fn swapFocused(self: *Tree, dir: Direction) void {
+        const from = self.focused;
+        if (from.* != .leaf) return;
+        const target = self.findInDirection(dir) orelse return;
+        self.swapNodes(from, target);
+        self.focusNode(from);
     }
 
     /// Update `focused` to the leaf that ACTUALLY holds GTK keyboard focus right
@@ -734,6 +748,30 @@ pub const Tree = struct {
                 parent.split.paned.setEndChild(node.widget());
             },
         }
+    }
+
+    /// Swap two leaves' positions in the tree: exchange their GTK slots and the
+    /// node pointers in their parent splits. Each pane resizes to fill the
+    /// other's old slot; per-paned divider positions are untouched. Both nodes
+    /// must be non-root (always true when found via `findInDirection`, which
+    /// only returns a target when there are ≥2 panes).
+    fn swapNodes(self: *Tree, a: *Node, b: *Node) void {
+        if (a == b) return;
+        // Capture both slots BEFORE mutating — slotOf walks the live tree.
+        const slot_a = self.slotOf(a);
+        const slot_b = self.slotOf(b);
+        // Hold a ref on each widget so detaching it from its paned (which drops
+        // the paned's reference) doesn't finalize it before we re-attach.
+        const a_obj = a.widget().as(gobject.Object);
+        _ = a_obj.ref();
+        defer a_obj.unref();
+        const b_obj = b.widget().as(gobject.Object);
+        _ = b_obj.ref();
+        defer b_obj.unref();
+        self.detachSlot(slot_a);
+        self.detachSlot(slot_b);
+        self.attach(slot_a, b);
+        self.attach(slot_b, a);
     }
 
     // --- Persistence ------------------------------------------------------

@@ -453,7 +453,9 @@ fn onSurfaceCloseRequest(_: *Surface, _: ?*anyopaque) callconv(.c) void {}
 //   Focus:
 //     Alt+1 .. Alt+9            focus the Nth leaf in tree order (roles are no
 //                               longer unique, so we index by position)
-//     Ctrl+Alt+Left/Right/Up/Down   directional focus, walking the tree
+//     Ctrl+Alt+Left/Right/Up/Down   directional focus (spatial, Hyprland-style)
+//     Ctrl+Shift+Alt+Left/Right/Up/Down  swap focused pane with that neighbor
+//                               (focus follows the moved pane)
 //
 //   Tree ops:
 //     Ctrl+Shift+R              split focused pane horizontally (new pane to
@@ -517,6 +519,12 @@ fn setupShortcuts(
     addAction(map, "focus-up", onFocusUp, app_ctx);
     addAction(map, "focus-down", onFocusDown, app_ctx);
 
+    // Swap the focused pane with its neighbor: Ctrl+Shift+Alt+Arrow.
+    addAction(map, "swap-left", onSwapLeft, app_ctx);
+    addAction(map, "swap-right", onSwapRight, app_ctx);
+    addAction(map, "swap-up", onSwapUp, app_ctx);
+    addAction(map, "swap-down", onSwapDown, app_ctx);
+
     // Splits + close.
     addAction(map, "split-h", onSplitH, app_ctx);
     addAction(map, "split-v", onSplitV, app_ctx);
@@ -556,6 +564,10 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.focus-right", "<Ctrl><Alt>Right");
     setAccel(gtk_app, "win.focus-up", "<Ctrl><Alt>Up");
     setAccel(gtk_app, "win.focus-down", "<Ctrl><Alt>Down");
+    setAccel(gtk_app, "win.swap-left", "<Ctrl><Shift><Alt>Left");
+    setAccel(gtk_app, "win.swap-right", "<Ctrl><Shift><Alt>Right");
+    setAccel(gtk_app, "win.swap-up", "<Ctrl><Shift><Alt>Up");
+    setAccel(gtk_app, "win.swap-down", "<Ctrl><Shift><Alt>Down");
     setAccel(gtk_app, "win.split-h", "<Ctrl><Shift>R");
     setAccel(gtk_app, "win.split-v", "<Ctrl><Shift>D");
     setAccel(gtk_app, "win.close-pane", "<Ctrl>w");
@@ -637,6 +649,25 @@ fn onFocusUp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.
 }
 fn onFocusDown(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.moveFocus(.down);
+}
+
+// Swap the focused pane with its neighbor in a direction (Ctrl+Shift+Alt+Arrow).
+// Persist the new arrangement so it survives a reopen.
+fn onSwapLeft(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.swapPane(.left);
+    saveLayout(a);
+}
+fn onSwapRight(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.swapPane(.right);
+    saveLayout(a);
+}
+fn onSwapUp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.swapPane(.up);
+    saveLayout(a);
+}
+fn onSwapDown(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.swapPane(.down);
+    saveLayout(a);
 }
 
 // --- Structural handlers ---------------------------------------------------
