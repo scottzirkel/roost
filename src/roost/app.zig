@@ -548,6 +548,8 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 //                               Enter quits; saves layout)
 //     Ctrl+Shift+/  (Ctrl+?)    show the keyboard cheat-sheet (this list, as a
 //                               modal grouped by section)
+//     Ctrl+Shift+M              toggle focus-follows-mouse (on by default: the
+//                               pointer entering a pane focuses it)
 //
 // Collision notes: Ctrl+Shift+{R,D,A,S,G,E,N,W,B} and Ctrl+Alt+arrows avoid the
 // common shell/vim/lazygit single-key and Ctrl-only bindings. Ctrl+W is the
@@ -619,8 +621,11 @@ fn setupShortcuts(
     // Cross-pane: send scratchpad text to the agent (Ctrl+Return).
     addAction(map, "send-to-agent", onSendToAgent, app_ctx);
 
-    // Keyboard cheat-sheet (Ctrl+?).
+    // Keyboard cheat-sheet (Ctrl+Shift+/).
     addAction(map, "show-help", onShowHelp, app_ctx);
+
+    // Toggle focus-follows-mouse (Ctrl+Shift+M).
+    addAction(map, "toggle-follow-mouse", onToggleFollowMouse, app_ctx);
 
     // Accelerators.
     setAccel(gtk_app, "win.focus-1", "<Alt>1");
@@ -662,6 +667,7 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.create-worktree", "<Ctrl><Shift>b");
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
+    setAccel(gtk_app, "win.toggle-follow-mouse", "<Ctrl><Shift>M");
 
     // Quit: Ctrl+Q reuses the existing `win.close` action (clean shutdown +
     // layout save, both via onWindowCloseRequest).
@@ -1267,6 +1273,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+B", .text = "New branch + worktree" },
     .{ .text = "Other" },
     .{ .keys = "Ctrl+Enter", .text = "Send scratchpad selection → agent" },
+    .{ .keys = "Ctrl+Shift+M", .text = "Toggle focus-follows-mouse (on by default)" },
     .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
     .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
 };
@@ -1328,6 +1335,11 @@ fn presentShortcuts(a: *AppContext) void {
 
 fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     presentShortcuts(a);
+}
+
+fn onToggleFollowMouse(_: *gio.SimpleAction, _: ?*glib.Variant, _: *AppContext) callconv(.c) void {
+    const on = tree.toggleFollowMouse();
+    log.info("focus-follows-mouse {s}", .{if (on) "on" else "off"});
 }
 
 /// Show a simple modal error alert with a single OK button. Best-effort: a

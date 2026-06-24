@@ -32,6 +32,17 @@ const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 
 const log = std.log.scoped(.roost_tree);
 
+/// Focus-follows-mouse: when on, the pointer entering a pane focuses it (mini-
+/// Hyprland feel). App-wide mode (not per-tree), so a module global; toggled at
+/// runtime. Default on. Read by every leaf's motion controller (`onLeafEnter`).
+var follow_mouse: bool = true;
+
+/// Flip focus-follows-mouse and return the new state (for the toggle action).
+pub fn toggleFollowMouse() bool {
+    follow_mouse = !follow_mouse;
+    return follow_mouse;
+}
+
 /// The semantic roles a pane can have. Extensible: add a variant + its `title`
 /// and `spawn` behavior (in `Tree.spawnPane`) and everything else follows.
 pub const Role = enum {
@@ -322,6 +333,8 @@ pub const Tree = struct {
 
         const lb = labeledBox(role, pane.widget());
         node.* = .{ .leaf = .{ .role = role, .pane = pane, .box = lb.box, .label = lb.label } };
+        // Focus-follows-mouse: focus this leaf when the pointer enters its box.
+        attachFollowMouse(node, lb.box);
         return node;
     }
 
@@ -1283,6 +1296,23 @@ fn panedIntProp(paned: *gtk.Paned, name: [:0]const u8) c_int {
     defer val.unset();
     gobject.Object.getProperty(paned.as(gobject.Object), name, &val);
     return gobject.ext.Value.get(&val, c_int);
+}
+
+/// Attach a motion controller to a leaf's `box` so the pointer entering it
+/// focuses `node` (focus-follows-mouse, when `follow_mouse` is on). The
+/// controller is owned by the widget, so it's torn down with the box on close —
+/// which happens before the node is freed in every teardown path, so the `node`
+/// passed here is always live when `onLeafEnter` fires.
+fn attachFollowMouse(node: *Node, box: *gtk.Box) void {
+    const motion = gtk.EventControllerMotion.new();
+    _ = gtk.EventControllerMotion.signals.enter.connect(motion, *Node, onLeafEnter, node, .{});
+    box.as(gtk.Widget).addController(motion.as(gtk.EventController));
+}
+
+fn onLeafEnter(_: *gtk.EventControllerMotion, _: f64, _: f64, node: *Node) callconv(.c) void {
+    if (!follow_mouse) return;
+    if (node.* != .leaf) return; // defensive; a leaf node never changes variant
+    node.leaf.pane.focus();
 }
 
 /// Wrap a pane's content widget in a vertical box with a small role header.
