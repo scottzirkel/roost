@@ -128,6 +128,18 @@ pub const Workspace = struct {
         self.t.swapFocused(dir);
     }
 
+    /// Whether closing the focused pane right now would kill a running agent.
+    /// Syncs live focus first (the user may have clicked into another pane).
+    pub fn focusedIsLiveAgent(self: *Workspace) bool {
+        if (self.window) |w| self.t.syncFocusFromWindow(w);
+        return self.t.focusedIsLiveAgent();
+    }
+
+    /// Whether any pane currently holds a running agent (for reset/rebuild).
+    pub fn hasLiveAgent(self: *Workspace) bool {
+        return self.t.hasLiveAgent();
+    }
+
     /// Split the focused leaf; the new pane defaults to `shell`.
     pub fn split(self: *Workspace, orientation: gtk.Orientation) void {
         if (self.window) |w| self.t.syncFocusFromWindow(w);

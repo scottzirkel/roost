@@ -609,6 +609,40 @@ pub const Tree = struct {
         return found;
     }
 
+    // --- Live-agent detection --------------------------------------------
+    // Used to confirm before a destructive op (close-pane / reset) would kill a
+    // running agent mid-task. Only an Agent-role pane whose child process is
+    // still alive counts — shell/git/editor panes and the scratchpad never do.
+
+    /// Whether `leaf` is an Agent pane with a still-running child (e.g. `claude`).
+    fn leafIsLiveAgent(leaf: *Leaf) bool {
+        if (leaf.role != .agent) return false;
+        return switch (leaf.pane) {
+            .terminal => |*t| t.hasLiveProcess(),
+            .scratchpad => false,
+        };
+    }
+
+    /// Whether the focused pane is a live agent (so close-pane would kill it).
+    /// Callers should `syncFocusFromWindow` first if the user may have clicked
+    /// into a different pane than the last programmatic focus.
+    pub fn focusedIsLiveAgent(self: *Tree) bool {
+        return self.focused.* == .leaf and leafIsLiveAgent(&self.focused.leaf);
+    }
+
+    /// Whether ANY pane holds a live agent (so a reset/rebuild that tears the
+    /// whole tree down would kill it).
+    pub fn hasLiveAgent(self: *Tree) bool {
+        return nodeHasLiveAgent(self.root);
+    }
+
+    fn nodeHasLiveAgent(node: *Node) bool {
+        return switch (node.*) {
+            .leaf => |*l| leafIsLiveAgent(l),
+            .split => |*s| nodeHasLiveAgent(s.start) or nodeHasLiveAgent(s.end),
+        };
+    }
+
     // --- Structural operations -------------------------------------------
 
     /// Split the focused leaf into two along `orientation`. The focused pane

@@ -55,6 +55,11 @@ const AppContext = struct {
     workspace: *Workspace,
     /// The current project. Owns its path; replaced (old freed) on rebuild.
     current: Project,
+    /// One-shot bypass for the quit confirmation: `onWindowCloseRequest` vetoes
+    /// the first close and asks; the confirm handler sets this and re-issues the
+    /// close, which then proceeds. Also set when closing the last pane (the user
+    /// already acted on it), so Ctrl+W doesn't double-prompt.
+    quit_confirmed: bool = false,
 };
 
 /// Whether our custom event loop should keep running. Module-level because the
@@ -419,13 +424,35 @@ fn installPaneCss(window: *gtk.ApplicationWindow) void {
     );
 }
 
-/// Window `close-request` handler. Save the current layout, flip the loop off,
-/// and return false (0) so the default handler destroys the window. The
-/// deferred MainContext drain in `run` lets renderer/IO threads exit cleanly.
+/// Window `close-request` handler. Both Ctrl+Q (`win.close`) and the WM close
+/// button funnel through here, so it's the one place to gate quitting. We veto
+/// the first request and show an unconditional confirmation; on confirm,
+/// `doQuit` sets `quit_confirmed` and re-issues the close, which lands back here
+/// and proceeds: save the layout, flip the loop off, and return false (0) so the
+/// default handler destroys the window. The deferred MainContext drain in `run`
+/// lets renderer/IO threads exit cleanly.
 fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int {
+    if (!app_ctx.quit_confirmed) {
+        confirmDestructive(
+            app_ctx,
+            "Quit Roost?",
+            "This closes the window and ends everything running in it.",
+            "Quit",
+            doQuit,
+            true, // Quit is the default → Ctrl+Q then Enter quits.
+        );
+        return @intFromBool(true); // veto: keep the window open behind the dialog
+    }
     saveLayout(app_ctx);
     running = false;
     return @intFromBool(false);
+}
+
+/// Accept handler for the quit confirmation: authorize the close and re-issue
+/// it. The re-issued close-request sees `quit_confirmed` and tears down.
+fn doQuit(a: *AppContext) void {
+    a.quit_confirmed = true;
+    a.window.as(gtk.Window).close();
 }
 
 /// Serialize the current workspace tree to the layout file keyed by the current
@@ -463,7 +490,8 @@ fn onSurfaceCloseRequest(_: *Surface, _: ?*anyopaque) callconv(.c) void {}
 //     Ctrl+Shift+D              split focused pane vertically  (new pane Down;
 //                               new pane = shell)
 //     Ctrl+W                    close focused pane (sibling collapses up); if
-//                               it was the last pane, quit cleanly
+//                               it was the last pane, quit cleanly. Confirms
+//                               first if the focused pane is a running agent.
 //
 //   Add a pane by role (each adds a new pane below the focused one):
 //     Ctrl+Shift+A              add Agent
@@ -484,10 +512,14 @@ fn onSurfaceCloseRequest(_: *Surface, _: ?*anyopaque) callconv(.c) void {}
 //                               <repo>.worktrees/<branch>) and switch into it
 //
 //   App:
-//     Ctrl+Alt+R                reset layout to the default 2x2 (current project)
+//     Ctrl+Alt+R                reset layout to the default 2x2 (current
+//                               project); confirms first if any pane is a
+//                               running agent
 //     Ctrl+O                    open the project/worktree chooser (recents +
-//                               worktrees + open/create); pick = switch window
-//     Ctrl+Q                    quit (saves layout)
+//                               worktrees + open/create); pick a row → confirm
+//                               (Switch / Open in New Window / Cancel)
+//     Ctrl+Q                    quit (confirms first, Quit is the default so
+//                               Enter quits; saves layout)
 //
 // Collision notes: Ctrl+Shift+{R,D,A,S,G,E,N,W,B} and Ctrl+Alt+arrows avoid the
 // common shell/vim/lazygit single-key and Ctrl-only bindings. Ctrl+W is the
@@ -681,9 +713,31 @@ fn onSplitV(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
     saveLayout(a);
 }
 fn onClosePane(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    // Closing the last pane quits the app via the clean window-close path
-    // (which also saves the layout). Otherwise save the collapsed layout.
+    // Don't silently end a running agent: confirm first, then close. The
+    // focused pane is captured by `Tree.focused` (synced inside the check), and
+    // closing later acts on that same pane, so the dialog stealing focus is fine.
+    if (a.workspace.focusedIsLiveAgent()) {
+        confirmDestructive(
+            a,
+            "Close this agent pane?",
+            "An agent is still running here. Closing the pane ends it.",
+            "Close pane",
+            doClosePane,
+            false,
+        );
+        return;
+    }
+    doClosePane(a);
+}
+
+/// Actually close the focused pane. Closing the last pane quits the app via the
+/// clean window-close path (which also saves the layout); otherwise save the
+/// collapsed layout.
+fn doClosePane(a: *AppContext) void {
     if (a.workspace.closeFocused()) {
+        // The user explicitly closed the last pane (and already confirmed it if
+        // it was an agent), so don't make them re-answer the quit prompt.
+        a.quit_confirmed = true;
         a.window.as(gtk.Window).close();
     } else {
         saveLayout(a);
@@ -695,6 +749,22 @@ fn onClosePane(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv
 /// panes down to one (or otherwise wanting a clean slate). Mirrors the
 /// rebuildWorkspace swap, but with `saved=null` (-> default) and same project.
 fn onResetLayout(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    // Reset tears down EVERY pane, so confirm if any of them is a live agent.
+    if (a.workspace.hasLiveAgent()) {
+        confirmDestructive(
+            a,
+            "Reset the layout?",
+            "An agent is still running. Resetting to the default 2×2 ends every pane, including the agent.",
+            "Reset layout",
+            doResetLayout,
+            false,
+        );
+        return;
+    }
+    doResetLayout(a);
+}
+
+fn doResetLayout(a: *AppContext) void {
     log.info("reset-layout: rebuilding default 2x2", .{});
     const cwd: ?[:0]const u8 = if (a.current.path.len > 0) a.current.path else null;
     var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, null); // null => default 2x2
@@ -804,7 +874,7 @@ fn onFolderChosen(
     };
     defer glib.free(path);
 
-    rebuildWorkspace(app_ctx, std.mem.span(path));
+    confirmSwitch(app_ctx, std.mem.span(path));
 }
 
 /// Tear down the live workspace and build a fresh one rooted at `new_path`.
@@ -864,6 +934,62 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
     setWindowTitle(app_ctx.window, new_project);
     app_ctx.workspace.focusIndex(0);
     app_ctx.workspace.updateHighlight();
+}
+
+/// Heap state for the async switch confirmation. `path` is an owned copy: the
+/// caller's path (a chooser row, a freed dialog buffer) won't outlive the async
+/// dialog, so we dup it and free it in the response callback.
+const SwitchReq = struct {
+    a: *AppContext,
+    path: [:0]u8,
+};
+
+/// Confirm before switching THIS window to `new_path` (which tears down the
+/// current workspace and anything running in it), then `rebuildWorkspace`. Used
+/// by the pure-switch entry points (chooser row, Open Folder…). The worktree
+/// CREATE flow keeps its own "Create" dialog as the gate and switches directly.
+fn confirmSwitch(a: *AppContext, new_path: []const u8) void {
+    const path = a.alloc.dupeZ(u8, new_path) catch return;
+    const req = a.alloc.create(SwitchReq) catch {
+        a.alloc.free(path);
+        return;
+    };
+    req.* = .{ .a = a, .path = path };
+
+    const dialog = adw.AlertDialog.new("Switch project?", "Replace this window with the project, or open it in a new window.");
+    // Order shown: Switch, Open in New Window, Cancel. Only "switch" is
+    // destructive (it tears down this workspace); "newwin" leaves it untouched.
+    dialog.addResponse("switch", "Switch");
+    dialog.addResponse("newwin", "Open in New Window");
+    dialog.addResponse("cancel", "Cancel");
+    dialog.setResponseAppearance("switch", .destructive);
+    dialog.setDefaultResponse("cancel");
+    dialog.setCloseResponse("cancel");
+    dialog.choose(a.window.as(gtk.Widget), null, onSwitchResponse, req);
+}
+
+/// `gio.AsyncReadyCallback` for `confirmSwitch`. "switch" replaces this window;
+/// "newwin" opens the target in a detached window (this one untouched); "cancel"
+/// or dismiss does nothing. Frees the request in every path.
+fn onSwitchResponse(
+    source: ?*gobject.Object,
+    res: *gio.AsyncResult,
+    data: ?*anyopaque,
+) callconv(.c) void {
+    const req: *SwitchReq = @ptrCast(@alignCast(data orelse return));
+    const a = req.a;
+    defer {
+        a.alloc.free(req.path);
+        a.alloc.destroy(req);
+    }
+
+    const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
+    const response = dialog.chooseFinish(res);
+    if (std.mem.orderZ(u8, "switch", response) == .eq) {
+        rebuildWorkspace(a, req.path);
+    } else if (std.mem.orderZ(u8, "newwin", response) == .eq) {
+        openProjectNewWindow(a, req.path);
+    }
 }
 
 // --- Git worktree command center (Phase 3c) -------------------------------
@@ -977,6 +1103,59 @@ fn onWorktreeResponse(
     }
 
     rebuildWorkspace(a, dest);
+}
+
+// --- Destructive-action confirmation --------------------------------------
+// Guard close/reset so they never silently kill a running agent mid-task.
+
+/// Heap state threaded through the async confirm dialog. `on_confirm` runs only
+/// if the user accepts; the struct is freed in the response callback either way.
+const ConfirmReq = struct {
+    a: *AppContext,
+    on_confirm: *const fn (*AppContext) void,
+};
+
+/// Present a modal "are you sure?" with a destructive accept button. On accept,
+/// `on_confirm(a)` runs. `default_accept` controls which response Enter triggers:
+/// false (close/reset) makes Cancel the default so a reflexive Enter is safe;
+/// true (quit) makes the accept the default so Ctrl+Q → Enter quits. Esc always
+/// cancels. If we can't even allocate the request we fail safe by doing nothing.
+fn confirmDestructive(
+    a: *AppContext,
+    heading: [*:0]const u8,
+    body: [*:0]const u8,
+    accept_label: [*:0]const u8,
+    on_confirm: *const fn (*AppContext) void,
+    default_accept: bool,
+) void {
+    const req = a.alloc.create(ConfirmReq) catch return;
+    req.* = .{ .a = a, .on_confirm = on_confirm };
+
+    const dialog = adw.AlertDialog.new(heading, body);
+    dialog.addResponse("cancel", "Cancel");
+    dialog.addResponse("accept", accept_label);
+    dialog.setResponseAppearance("accept", .destructive);
+    dialog.setDefaultResponse(if (default_accept) "accept" else "cancel");
+    dialog.setCloseResponse("cancel"); // Esc always cancels.
+    dialog.choose(a.window.as(gtk.Widget), null, onConfirmResponse, req);
+}
+
+/// `gio.AsyncReadyCallback` for `confirmDestructive`. Runs `on_confirm` only on
+/// the "accept" response; frees the request in every path.
+fn onConfirmResponse(
+    source: ?*gobject.Object,
+    res: *gio.AsyncResult,
+    data: ?*anyopaque,
+) callconv(.c) void {
+    const req: *ConfirmReq = @ptrCast(@alignCast(data orelse return));
+    const a = req.a;
+    const on_confirm = req.on_confirm;
+    a.alloc.destroy(req);
+
+    const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
+    const response = dialog.chooseFinish(res);
+    if (std.mem.orderZ(u8, "accept", response) != .eq) return;
+    on_confirm(a);
 }
 
 /// Show a simple modal error alert with a single OK button. Best-effort: a
@@ -1177,8 +1356,9 @@ fn onChooserRow(_: *gtk.ListBox, row: *gtk.ListBoxRow, st: *ChooserState) callco
         log.debug("ignoring early (phantom) chooser row activation idx={d}", .{i});
         return;
     }
-    // Default action: replace THIS window with the picked project.
-    rebuildWorkspace(st.app_ctx, st.paths[i]);
+    // Default action: replace THIS window with the picked project (after a
+    // confirm). `confirmSwitch` dups the path before we free the chooser state.
+    confirmSwitch(st.app_ctx, st.paths[i]);
     _ = st.dialog.as(adw.Dialog).close();
 }
 

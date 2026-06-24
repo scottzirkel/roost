@@ -110,6 +110,16 @@ pub const TerminalPane = union(enum) {
         }
     }
 
+    /// Whether this pane's child process is still running (the terminal hasn't
+    /// observed the child exit). A surface that hasn't spawned its child yet
+    /// reports false. Best-effort signal used to confirm before a destructive
+    /// close would silently kill, e.g., a running agent.
+    pub fn hasLiveProcess(self: *TerminalPane) bool {
+        switch (self.*) {
+            inline else => |*b| return b.hasLiveProcess(),
+        }
+    }
+
     /// The GtkWidget for this pane, to be parented into a container.
     pub fn widget(self: *TerminalPane) *gtk.Widget {
         switch (self.*) {
@@ -216,6 +226,14 @@ pub const GhosttyTerminalPane = struct {
         // Ask the surface to close. It owns its own teardown (renderer/IO
         // threads) in response to this.
         self.surface.close();
+    }
+
+    fn hasLiveProcess(self: *GhosttyTerminalPane) bool {
+        // The core surface exists once the child has spawned; `child_exited`
+        // flips true when that child dies (the moment Ghostty shows its
+        // "process exited" overlay). No core yet => nothing running to lose.
+        const core = self.surface.core() orelse return false;
+        return !core.child_exited;
     }
 
     fn widget(self: *GhosttyTerminalPane) *gtk.Widget {
