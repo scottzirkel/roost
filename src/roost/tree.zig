@@ -705,6 +705,48 @@ pub const Tree = struct {
         self.focusNode(new_leaf);
     }
 
+    /// Split the focused pane's CONTAINING group (its parent column/row) as a
+    /// unit: wrap that whole parent subtree in a fresh paned alongside a new
+    /// `new_role` leaf, so the new pane spans the full extent of the group and
+    /// gets its own divider — instead of nesting inside the focused leaf (which
+    /// is what `splitFocused` does, and what produces a shared outer divider).
+    ///
+    /// Example: from a left column `V[agent, shell]`, splitting the group
+    /// horizontally yields `H[ V[agent, shell] | new ]` — the column keeps its
+    /// own independent vertical divider, and `new` is a full-height sibling.
+    ///
+    /// If the focused leaf has no parent (it's the only pane), there is no group
+    /// to wrap, so this degenerates to a normal `splitFocused`. The new pane is
+    /// focused.
+    pub fn splitGroup(self: *Tree, orientation: gtk.Orientation, new_role: Role) Allocator.Error!void {
+        const leaf = self.focused;
+        if (leaf.* != .leaf) return; // defensive; focused is always a leaf
+        const group = parentOf(self.root, leaf) orelse {
+            // Only one pane in the tree — nothing to wrap; just split the leaf.
+            return self.splitFocused(orientation, new_role);
+        };
+
+        // Build the new sibling leaf.
+        const new_leaf = try self.makeLeaf(new_role);
+
+        // Detach the whole group subtree's widget from its current slot so we can
+        // reparent it under a fresh paned. Hold a ref so detaching (which drops
+        // the parent paned's reference) doesn't finalize it.
+        const group_widget = group.widget();
+        const obj = group_widget.as(gobject.Object);
+        _ = obj.ref();
+        defer obj.unref();
+        const slot = self.detach(group);
+
+        // New paned: the existing group (start) beside/over the new leaf (end).
+        const new_split = try self.makeSplit(orientation, group, new_leaf, 0.5);
+
+        // Re-attach the new split into the slot the group used to hold.
+        self.attach(slot, new_split);
+
+        self.focusNode(new_leaf);
+    }
+
     /// Close the focused leaf. Its sibling collapses up to replace the parent
     /// split. Returns `.closed_last` if this was the LAST pane (caller should
     /// quit), else `.collapsed`. Focus moves to a neighboring leaf.

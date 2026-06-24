@@ -505,6 +505,9 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 //                               the Right; new pane = shell)
 //     Ctrl+Shift+D              split focused pane vertically  (new pane Down;
 //                               new pane = shell)
+//     Ctrl+Shift+Alt+R          split the focused pane's whole COLUMN/ROW as a
+//                               unit, new pane to the Right (independent divider)
+//     Ctrl+Shift+Alt+D          same, vertically (new full-width row Down)
 //     Ctrl+W                    close focused pane (sibling collapses up); if
 //                               it was the last pane, quit cleanly. Confirms
 //                               first if the focused pane is a running agent.
@@ -576,6 +579,9 @@ fn setupShortcuts(
     // Splits + close.
     addAction(map, "split-h", onSplitH, app_ctx);
     addAction(map, "split-v", onSplitV, app_ctx);
+    // Group splits: split the focused pane's whole column/row as a unit.
+    addAction(map, "split-group-h", onSplitGroupH, app_ctx);
+    addAction(map, "split-group-v", onSplitGroupV, app_ctx);
     addAction(map, "close-pane", onClosePane, app_ctx);
 
     // Add a pane by role.
@@ -618,6 +624,8 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.swap-down", "<Ctrl><Shift><Alt>Down");
     setAccel(gtk_app, "win.split-h", "<Ctrl><Shift>R");
     setAccel(gtk_app, "win.split-v", "<Ctrl><Shift>D");
+    setAccel(gtk_app, "win.split-group-h", "<Ctrl><Shift><Alt>R");
+    setAccel(gtk_app, "win.split-group-v", "<Ctrl><Shift><Alt>D");
     setAccel(gtk_app, "win.close-pane", "<Ctrl>w");
     setAccel(gtk_app, "win.add-agent", "<Ctrl><Shift>A");
     setAccel(gtk_app, "win.add-shell", "<Ctrl><Shift>S");
@@ -726,6 +734,14 @@ fn onSplitH(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
 }
 fn onSplitV(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.split(.vertical);
+    saveLayout(a);
+}
+fn onSplitGroupH(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.splitGroup(.horizontal);
+    saveLayout(a);
+}
+fn onSplitGroupV(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.splitGroup(.vertical);
     saveLayout(a);
 }
 fn onClosePane(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {

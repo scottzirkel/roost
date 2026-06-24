@@ -160,6 +160,16 @@ pub const Workspace = struct {
         };
     }
 
+    /// Split the focused pane's whole containing column/row as a unit (so the
+    /// new pane spans the group with its own divider); new pane defaults to
+    /// `shell`. Lets the user build independent-divider grids.
+    pub fn splitGroup(self: *Workspace, orientation: gtk.Orientation) void {
+        if (self.window) |w| self.t.syncFocusFromWindow(w);
+        self.t.splitGroup(orientation, .shell) catch |err| {
+            log.warn("split-group failed err={}", .{err});
+        };
+    }
+
     /// Add a new pane in the given role by splitting the focused leaf. We split
     /// vertically (new pane below) by default; the user can re-split as needed.
     /// "Add a pane by role" reuses the split machinery so the new pane lands in
