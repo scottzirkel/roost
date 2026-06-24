@@ -87,21 +87,6 @@ pub const Direction = enum {
     right,
     up,
     down,
-
-    fn orientation(self: Direction) gtk.Orientation {
-        return switch (self) {
-            .left, .right => .horizontal,
-            .up, .down => .vertical,
-        };
-    }
-
-    /// Does this direction move toward the END child of a split on its axis?
-    fn towardEnd(self: Direction) bool {
-        return switch (self) {
-            .right, .down => true,
-            .left, .up => false,
-        };
-    }
 };
 
 /// A pane's content: either a Ghostty terminal or the scratchpad text view.
@@ -203,6 +188,13 @@ pub const Tree = struct {
     has_root: bool = false,
     /// The currently-focused leaf. Always a node within the tree.
     focused: *Node,
+
+    /// The leaf currently carrying the `.roost-active` CSS highlight (the
+    /// active-pane indicator). Tracked so we can clear it from the old leaf when
+    /// focus moves. Null until the first highlight is applied. May briefly point
+    /// at a leaf that is mid-teardown only between detach and node-free, which we
+    /// never dereference (we only `removeCssClass`, guarded by a leaf check).
+    highlighted: ?*Node = null,
 
     /// Command the Git role runs (lazygit or null=shell). Editor uses $EDITOR.
     git_cmd: ?[:0]const u8,
@@ -433,6 +425,7 @@ pub const Tree = struct {
                 self.destroyNode(s.end);
             },
         }
+        if (self.highlighted == node) self.highlighted = null;
         self.alloc.destroy(node);
     }
 
@@ -466,33 +459,24 @@ pub const Tree = struct {
         }
     }
 
-    /// Move focus one step in `dir`, walking the tree geometrically: ascend to
-    /// the nearest ancestor split whose orientation matches the direction's
-    /// axis and where the current subtree is on the "from" side, then descend
-    /// into the sibling toward the boundary we crossed. No-op if at an edge.
+    /// Move focus one step in `dir`, Hyprland-style: pick the pane that actually
+    /// lies in that direction on screen, not the next one in tree order. We lay
+    /// the tree out into normalized [0,1]x[0,1] rectangles (using each split's
+    /// LIVE divider ratio, so manual drags are respected), then among the panes
+    /// whose center is past the focused pane's center in `dir`, choose the one
+    /// with the most overlap on the perpendicular axis — tie-broken by nearest.
+    /// This preserves the cross-axis position (e.g. moving right from the
+    /// bottom-left pane lands on the bottom-right pane, not the top-right one).
+    /// No-op if there is no pane in that direction (an edge).
     pub fn moveFocus(self: *Tree, dir: Direction) void {
-        const want_axis = dir.orientation();
-        const toward_end = dir.towardEnd();
+        const from = self.focused;
+        if (from.* != .leaf) return;
+        const from_rect = rectOf(self.root, from, unit_rect) orelse return;
 
-        var child = self.focused;
-        var parent = parentOf(self.root, child);
-        while (parent) |p| {
-            const split = &p.split;
-            const on_start = split.start == child;
-            // We can cross this split iff it's on the right axis AND moving in
-            // `dir` would leave `child` for its sibling.
-            if (split.orientation == want_axis and on_start == toward_end) {
-                const sibling = if (on_start) split.end else split.start;
-                // Descend into the sibling, entering from the boundary side:
-                // moving toward end -> enter sibling from its start edge.
-                const leaf = edgeLeaf(sibling, want_axis, !toward_end);
-                self.focusNode(leaf);
-                return;
-            }
-            child = p;
-            parent = parentOf(self.root, p);
-        }
-        // At an edge in this direction; stay put.
+        var search: FocusSearch = .{ .dir = dir, .from = from_rect, .from_node = from };
+        searchDirection(self.root, unit_rect, &search);
+        if (search.best) |b| self.focusNode(b);
+        // else: no pane in that direction — stay put.
     }
 
     /// Update `focused` to the leaf that ACTUALLY holds GTK keyboard focus right
@@ -506,6 +490,41 @@ pub const Tree = struct {
         var found: ?*Node = null;
         findFocusedLeaf(self.root, fw, &found);
         if (found) |n| self.focused = n;
+    }
+
+    // --- Active-pane indicator -------------------------------------------
+
+    /// CSS class toggled on the focused leaf's box. Styled by the app-level CSS
+    /// provider (see app.zig): every pane carries a faint `.roost-pane` border,
+    /// and `.roost-active` brightens that border's color (no size change, so the
+    /// terminal grid never reflows when focus moves).
+    const active_css_class = "roost-active";
+
+    /// Move the `.roost-active` highlight onto `node`'s box, clearing it from the
+    /// previously highlighted leaf. No-op if `node` is already highlighted or is
+    /// not a leaf. The highlight is purely visual; it does not change `focused`.
+    pub fn highlightLeaf(self: *Tree, node: *Node) void {
+        if (self.highlighted == node) return;
+        if (self.highlighted) |old| {
+            if (old.* == .leaf) old.leaf.box.as(gtk.Widget).removeCssClass(active_css_class);
+        }
+        self.highlighted = null;
+        if (node.* != .leaf) return;
+        node.leaf.box.as(gtk.Widget).addCssClass(active_css_class);
+        self.highlighted = node;
+    }
+
+    /// Recompute the active-pane highlight from the window's live GTK focus
+    /// widget: find the leaf that contains it and move `.roost-active` there.
+    /// Driven by a window `notify::focus-widget` handler, so it tracks mouse
+    /// clicks, keyboard nav, and programmatic focus alike. No-op when focus is
+    /// outside any pane (e.g. a dialog) — the last pane stays highlighted, which
+    /// reads better than a flicker to "nothing focused".
+    pub fn updateHighlightFromWindow(self: *Tree, window: *gtk.Window) void {
+        const fw = window.getFocus() orelse return;
+        var found: ?*Node = null;
+        findFocusedLeaf(self.root, fw, &found);
+        if (found) |n| self.highlightLeaf(n);
     }
 
     // --- Cross-pane: send scratchpad text to the agent -------------------
@@ -640,7 +659,9 @@ pub const Tree = struct {
         split.paned.setStartChild(null);
         split.paned.setEndChild(null);
 
-        // Tear down the focused leaf (process + node struct).
+        // Tear down the focused leaf (process + node struct). Drop any dangling
+        // highlight pointer first so the next notify never reads a freed node.
+        if (self.highlighted == leaf) self.highlighted = null;
         leaf.leaf.pane.destroy();
         self.alloc.destroy(leaf);
 
@@ -828,20 +849,154 @@ fn lastLeaf(node: *Node) *Node {
     return cur;
 }
 
-/// The leaf reached by always taking the start (or end) child of splits on
-/// `axis` (and the start child of off-axis splits, deterministically). Used to
-/// descend into a sibling subtree when moving focus directionally.
-fn edgeLeaf(node: *Node, axis: gtk.Orientation, want_end: bool) *Node {
-    var cur = node;
-    while (cur.* == .split) {
-        const s = &cur.split;
-        if (s.orientation == axis) {
-            cur = if (want_end) s.end else s.start;
-        } else {
-            cur = s.start;
-        }
+// --- Geometric (Hyprland-style) directional focus -------------------------
+
+/// A normalized rectangle in [0,1]x[0,1] layout space (x right, y down).
+const NRect = struct {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+
+    fn cx(r: NRect) f64 {
+        return r.x + r.w / 2.0;
     }
-    return cur;
+    fn cy(r: NRect) f64 {
+        return r.y + r.h / 2.0;
+    }
+};
+
+const unit_rect: NRect = .{ .x = 0, .y = 0, .w = 1, .h = 1 };
+
+/// A split's live start-child proportion, read from its GtkPaned divider so
+/// manual drags are honored. Falls back to 0.5 before the paned is allocated
+/// (divider unset / zero extent), which still yields correct grid geometry.
+fn liveRatio(split: *const Split) f64 {
+    const w = split.paned.as(gtk.Widget);
+    const extent: c_int = if (split.orientation == .horizontal) w.getWidth() else w.getHeight();
+    if (extent <= 0) return 0.5;
+    const pos = split.paned.getPosition();
+    if (pos <= 0) return 0.5;
+    const r = @as(f64, @floatFromInt(pos)) / @as(f64, @floatFromInt(extent));
+    return std.math.clamp(r, 0.05, 0.95);
+}
+
+/// Split a parent rect into its (start, end) child rects along `orientation`
+/// at `ratio` (start-child proportion). Horizontal splits divide along x.
+fn childRects(orientation: gtk.Orientation, rect: NRect, ratio: f64) struct { NRect, NRect } {
+    if (orientation == .horizontal) {
+        const lw = rect.w * ratio;
+        return .{
+            .{ .x = rect.x, .y = rect.y, .w = lw, .h = rect.h },
+            .{ .x = rect.x + lw, .y = rect.y, .w = rect.w - lw, .h = rect.h },
+        };
+    } else {
+        const th = rect.h * ratio;
+        return .{
+            .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = th },
+            .{ .x = rect.x, .y = rect.y + th, .w = rect.w, .h = rect.h - th },
+        };
+    }
+}
+
+/// Compute the normalized rect of `target` within the subtree rooted at `node`
+/// (whose own rect is `rect`). Null if `target` isn't in this subtree.
+fn rectOf(node: *Node, target: *Node, rect: NRect) ?NRect {
+    if (node == target) return rect;
+    switch (node.*) {
+        .leaf => return null,
+        .split => |*s| {
+            const a, const b = childRects(s.orientation, rect, liveRatio(s));
+            return rectOf(s.start, target, a) orelse rectOf(s.end, target, b);
+        },
+    }
+}
+
+/// Running state for the directional pick: the best candidate so far and the
+/// scores that beat it (more perpendicular overlap wins, then nearer).
+const FocusSearch = struct {
+    dir: Direction,
+    from: NRect,
+    from_node: *Node,
+    best: ?*Node = null,
+    best_overlap: f64 = -1,
+    best_axial: f64 = 0,
+    best_perp: f64 = 0,
+};
+
+fn overlapLen(a0: f64, a1: f64, b0: f64, b1: f64) f64 {
+    return @max(0.0, @min(a1, b1) - @max(a0, b0));
+}
+
+/// Walk every leaf, computing its rect, and let `consider` score it.
+fn searchDirection(node: *Node, rect: NRect, s: *FocusSearch) void {
+    switch (node.*) {
+        .leaf => consider(node, rect, s),
+        .split => |*sp| {
+            const a, const b = childRects(sp.orientation, rect, liveRatio(sp));
+            searchDirection(sp.start, a, s);
+            searchDirection(sp.end, b, s);
+        },
+    }
+}
+
+/// Score one leaf rect `r` as a directional candidate, updating `s.best`.
+fn consider(node: *Node, r: NRect, s: *FocusSearch) void {
+    if (node == s.from_node) return;
+    const f = s.from;
+    const eps = 1e-6;
+
+    var axial: f64 = undefined;
+    var overlap: f64 = undefined;
+    var perp: f64 = undefined;
+    switch (s.dir) {
+        .left, .right => {
+            // Horizontal move: candidate must be ahead on x; overlap on y.
+            if (s.dir == .right) {
+                if (r.cx() <= f.cx() + eps) return;
+                axial = r.cx() - f.cx();
+            } else {
+                if (r.cx() >= f.cx() - eps) return;
+                axial = f.cx() - r.cx();
+            }
+            overlap = overlapLen(f.y, f.y + f.h, r.y, r.y + r.h);
+            perp = @abs(r.cy() - f.cy());
+        },
+        .up, .down => {
+            // Vertical move: candidate must be ahead on y; overlap on x.
+            if (s.dir == .down) {
+                if (r.cy() <= f.cy() + eps) return;
+                axial = r.cy() - f.cy();
+            } else {
+                if (r.cy() >= f.cy() - eps) return;
+                axial = f.cy() - r.cy();
+            }
+            overlap = overlapLen(f.x, f.x + f.w, r.x, r.x + r.w);
+            perp = @abs(r.cx() - f.cx());
+        },
+    }
+
+    // Prefer the most perpendicular overlap, then the nearest along the axis,
+    // then the nearest perpendicular center.
+    const better = if (s.best == null)
+        true
+    else if (overlap > s.best_overlap + eps)
+        true
+    else if (overlap < s.best_overlap - eps)
+        false
+    else if (axial < s.best_axial - eps)
+        true
+    else if (axial > s.best_axial + eps)
+        false
+    else
+        perp < s.best_perp;
+
+    if (better) {
+        s.best = node;
+        s.best_overlap = overlap;
+        s.best_axial = axial;
+        s.best_perp = perp;
+    }
 }
 
 /// Parse layout JSON into an arena-allocated `SerNode`. Returns null on any
@@ -936,6 +1091,10 @@ fn panedIntProp(paned: *gtk.Paned, name: [:0]const u8) c_int {
 /// the Leaf so the Agent-pane status badge can be updated in place).
 fn labeledBox(role: Role, content: *gtk.Widget) struct { box: *gtk.Box, label: *gtk.Label } {
     const box = gtk.Box.new(.vertical, 0);
+    // Every pane carries a faint base border; the active pane brightens it (see
+    // the app-level CSS provider). The border width is constant, so toggling the
+    // active class only changes color and never reflows the terminal grid.
+    box.as(gtk.Widget).addCssClass("roost-pane");
 
     const label = gtk.Label.new(role.title());
     label.setXalign(0.0);

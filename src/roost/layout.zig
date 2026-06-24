@@ -162,6 +162,13 @@ pub const Workspace = struct {
         self.t.setAgentStatus(status);
     }
 
+    /// Recompute the active-pane highlight from the window's live GTK focus.
+    /// Driven by the window `notify::focus-widget` handler (mouse + keyboard +
+    /// programmatic focus all route through it). No-op if no window is attached.
+    pub fn updateHighlight(self: *Workspace) void {
+        if (self.window) |w| self.t.updateHighlightFromWindow(w);
+    }
+
     /// Serialize the current tree to JSON bytes (caller frees with `alloc`).
     pub fn serialize(self: *Workspace, alloc: Allocator) ![]u8 {
         return self.t.serialize(alloc);

@@ -272,6 +272,20 @@ pub fn run() !void {
         .{},
     );
 
+    //    (b2) The window's focus widget changing drives the active-pane
+    //         indicator. One handler covers every path that moves GTK focus —
+    //         mouse clicks, keyboard nav actions, and programmatic grabs (split/
+    //         close all route through `pane.focus()` -> `grabFocus`). `&workspace`
+    //         is updated in place across project rebuilds, so it always reflects
+    //         the live tree.
+    _ = gobject.Object.signals.notify.connect(
+        window,
+        *Workspace,
+        onWindowFocusChanged,
+        &workspace,
+        .{ .detail = "focus-widget" },
+    );
+
     //    (c) Each terminal surface's `close-request`: a single pane's process
     //        exiting must NOT tear down the whole window. We connect a no-op
     //        handler so the surface keeps Ghostty's built-in "process exited"
@@ -295,7 +309,9 @@ pub fn run() !void {
     //    restored/centered by the tree once GTK has allocated each Paned (see
     //    tree.zig applyRatioOnAllocate).
     window.as(gtk.Window).present();
+    installPaneCss(window);
     workspace.focusIndex(0);
+    workspace.updateHighlight();
 
     // Desktop launch that resolved no last project (e.g. first-ever run): pop the
     // chooser so the user can pick a recent or open/create one.
@@ -371,6 +387,36 @@ fn resolveInitialProject(alloc: std.mem.Allocator) ?Project {
 /// `win.close` GAction handler: ask the window to close.
 fn onCloseAction(_: *gio.SimpleAction, _: ?*glib.Variant, window: *gtk.Window) callconv(.c) void {
     window.close();
+}
+
+/// Window `notify::focus-widget` handler: the GTK focus moved, so re-point the
+/// active-pane highlight at whichever pane now holds focus. Covers mouse clicks,
+/// keyboard nav, and programmatic grabs alike (all change the window's focus
+/// widget). `ws` is `&workspace`, updated in place across rebuilds.
+fn onWindowFocusChanged(_: *gtk.ApplicationWindow, _: *gobject.ParamSpec, ws: *Workspace) callconv(.c) void {
+    ws.updateHighlight();
+}
+
+/// Install the app-level CSS for the pane frames + active-pane indicator. Every
+/// leaf box carries `.roost-pane` (a faint, constant-width border); the focused
+/// pane also carries `.roost-active`, which only brightens the border color — no
+/// size change, so the terminal grid never reflows when focus moves. Registered
+/// once on the window's display; GTK keeps a single provider per display.
+fn installPaneCss(window: *gtk.ApplicationWindow) void {
+    const css =
+        \\.roost-pane { border: 1px solid rgba(255, 255, 255, 0.06); }
+        \\.roost-pane.roost-active { border-color: rgba(255, 255, 255, 0.26); }
+    ;
+    const provider = gtk.CssProvider.new();
+    defer provider.unref(); // the display takes its own ref in addProviderForDisplay
+    const bytes = glib.Bytes.new(css.ptr, css.len);
+    defer bytes.unref();
+    provider.loadFromBytes(bytes);
+    gtk.StyleContext.addProviderForDisplay(
+        window.as(gtk.Widget).getDisplay(),
+        provider.as(gtk.StyleProvider),
+        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10,
+    );
 }
 
 /// Window `close-request` handler. Save the current layout, flip the loop off,
@@ -786,6 +832,7 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
 
     setWindowTitle(app_ctx.window, new_project);
     app_ctx.workspace.focusIndex(0);
+    app_ctx.workspace.updateHighlight();
 }
 
 // --- Git worktree command center (Phase 3c) -------------------------------
