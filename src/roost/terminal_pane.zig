@@ -120,6 +120,14 @@ pub const TerminalPane = union(enum) {
         }
     }
 
+    /// Whether this pane is backed by `surface` — used to map a surface
+    /// close-request back to the pane that should close.
+    pub fn matchesSurface(self: *TerminalPane, surface: *Surface) bool {
+        switch (self.*) {
+            inline else => |*b| return b.matchesSurface(surface),
+        }
+    }
+
     /// The GtkWidget for this pane, to be parented into a container.
     pub fn widget(self: *TerminalPane) *gtk.Widget {
         switch (self.*) {
@@ -234,6 +242,10 @@ pub const GhosttyTerminalPane = struct {
         // "process exited" overlay). No core yet => nothing running to lose.
         const core = self.surface.core() orelse return false;
         return !core.child_exited;
+    }
+
+    fn matchesSurface(self: *GhosttyTerminalPane, surface: *Surface) bool {
+        return self.surface == surface;
     }
 
     fn widget(self: *GhosttyTerminalPane) *gtk.Widget {

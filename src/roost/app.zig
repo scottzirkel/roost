@@ -291,12 +291,12 @@ pub fn run() !void {
         .{ .detail = "focus-widget" },
     );
 
-    //    (c) Each terminal surface's `close-request`: a single pane's process
-    //        exiting must NOT tear down the whole window. We connect a no-op
-    //        handler so the surface keeps Ghostty's built-in "process exited"
-    //        overlay in that pane. The window closes only via `win.close`
-    //        (Ctrl+Q) or the WM/window close-request above.
-    workspace.connectCloseRequests(onSurfaceCloseRequest, null);
+    //    (c) Each terminal surface's `close-request`: a pane's child process
+    //        exiting (or the user clicking the "process exited" Close button)
+    //        auto-closes just that pane (`onSurfaceCloseRequest`), collapsing its
+    //        sibling up. Closing the last pane quits. The stable `&app_ctx` is
+    //        passed through so the handler can map the surface back to its pane.
+    workspace.connectCloseRequests(onSurfaceCloseRequest, &app_ctx);
 
     // 7b. Keyboard shortcuts. We mirror Ghostty's own approach (see
     //     application.zig `syncActionAccelerator`): register `gio.SimpleAction`s
@@ -466,12 +466,28 @@ fn saveLayout(app_ctx: *AppContext) void {
     project.writeLayout(app_ctx.alloc, app_ctx.current.path, bytes);
 }
 
-/// Surface `close-request` handler. Intentionally a no-op: when a single
-/// pane's child process exits, Ghostty raises this and ALSO shows its built-in
-/// "process exited" overlay in that pane (see Surface.childExited). We must NOT
-/// close the whole window here — that is the per-pane-exit UX bug we fixed.
-/// The window is torn down only via the `win.close` action or the WM close.
-fn onSurfaceCloseRequest(_: *Surface, _: ?*anyopaque) callconv(.c) void {}
+/// Surface `close-request` handler: auto-close the pane when its child process
+/// exits (Ghostty emits this after the child dies), and when the user clicks the
+/// "process exited" overlay's Close button (same signal). The pane collapses and
+/// its sibling fills the space.
+///
+/// Our OWN teardown (`TerminalPane.destroy` → `surface.close()`) re-emits this
+/// signal too; `isTearingDown` is set during those so we ignore them and never
+/// double-free. `data` is the stable `*AppContext`.
+fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return));
+    if (a.workspace.isTearingDown()) return;
+    const result = a.workspace.closeSurface(surface) orelse return;
+    switch (result) {
+        .closed_last => {
+            // The only pane's process exited — nothing left to show. Quit
+            // without the confirmation (the user didn't ask; the process ended).
+            a.quit_confirmed = true;
+            a.window.as(gtk.Window).close();
+        },
+        .collapsed => saveLayout(a),
+    }
+}
 
 // --- Keyboard shortcuts ---------------------------------------------------
 //
@@ -769,7 +785,7 @@ fn doResetLayout(a: *AppContext) void {
     const cwd: ?[:0]const u8 = if (a.current.path.len > 0) a.current.path else null;
     var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, null); // null => default 2x2
     new_ws.window = a.window.as(gtk.Window);
-    new_ws.connectCloseRequests(onSurfaceCloseRequest, null);
+    new_ws.connectCloseRequests(onSurfaceCloseRequest, a);
     a.window.as(gtk.Window).setChild(new_ws.root);
     a.workspace.deinit();
     a.workspace.* = new_ws;
@@ -912,7 +928,7 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
 
     var new_ws = Workspace.init(alloc, app_ctx.git_cmd, app_ctx.agent_cmd, new_project.path, saved);
     new_ws.window = app_ctx.window.as(gtk.Window); // for live-focus sync on ops
-    new_ws.connectCloseRequests(onSurfaceCloseRequest, null);
+    new_ws.connectCloseRequests(onSurfaceCloseRequest, app_ctx);
 
     // Swap the window child to the new workspace container. This unparents the
     // old workspace's widget tree (finalized once we drop its refs below).

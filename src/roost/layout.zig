@@ -140,6 +140,18 @@ pub const Workspace = struct {
         return self.t.hasLiveAgent();
     }
 
+    /// Close the pane backed by `surface` (its process exited). Returns null if
+    /// the surface isn't in this workspace, else how the close resolved.
+    pub fn closeSurface(self: *Workspace, surface: *Surface) ?Tree.CloseResult {
+        return self.t.closeSurface(surface);
+    }
+
+    /// Whether we're mid-teardown — the surface close-request handler uses this
+    /// to ignore the close-requests our own `pane.destroy()` re-emits.
+    pub fn isTearingDown(self: *Workspace) bool {
+        return self.t.tearing_down;
+    }
+
     /// Split the focused leaf; the new pane defaults to `shell`.
     pub fn split(self: *Workspace, orientation: gtk.Orientation) void {
         if (self.window) |w| self.t.syncFocusFromWindow(w);

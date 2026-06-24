@@ -207,6 +207,12 @@ pub const Tree = struct {
     /// terminal pane so a child process exiting never closes the window.
     close_cb: ?*const fn (*Surface, ?*anyopaque) callconv(.c) void = null,
     close_data: ?*anyopaque = null,
+    /// True while WE are tearing down panes (close/deinit). Our own
+    /// `pane.destroy()` calls `surface.close()`, which re-emits the surface
+    /// `close-request` signal; the handler checks this flag and ignores those
+    /// self-inflicted requests so it only acts on a genuine child-exit / user
+    /// close (which is how `closeSurface` auto-closes an exited pane).
+    tearing_down: bool = false,
 
     /// Build the DEFAULT 2x2 layout (first run / no saved state):
     ///   Agent (top-left) / Shell (bottom-left) | Git (top-right) / Scratchpad
@@ -413,8 +419,33 @@ pub const Tree = struct {
     /// gtk.Window.setChild(other)), which finalizes the widget hierarchy. We
     /// also call destroy() on terminal panes so Ghostty tears down cleanly.
     pub fn deinit(self: *Tree) void {
+        // Each `pane.destroy()` re-emits its surface close-request; flag the
+        // teardown so the handler ignores them all (we're freeing the tree).
+        self.tearing_down = true;
         self.destroyNode(self.root);
         self.* = undefined;
+    }
+
+    /// The leaf whose terminal pane wraps `surface`, or null. Used to map a
+    /// surface close-request back to the node that should collapse.
+    fn findLeafForSurface(self: *Tree, surface: *Surface) ?*Node {
+        var found: ?*Node = null;
+        surfaceLeafWalk(self.root, surface, &found);
+        return found;
+    }
+
+    fn surfaceLeafWalk(node: *Node, surface: *Surface, out: *?*Node) void {
+        switch (node.*) {
+            .leaf => |*l| {
+                if (l.pane == .terminal and l.pane.terminal.matchesSurface(surface)) {
+                    out.* = node;
+                }
+            },
+            .split => |*s| {
+                surfaceLeafWalk(s.start, surface, out);
+                surfaceLeafWalk(s.end, surface, out);
+            },
+        }
     }
 
     fn destroyNode(self: *Tree, node: *Node) void {
@@ -680,11 +711,24 @@ pub const Tree = struct {
     pub const CloseResult = enum { collapsed, closed_last };
 
     pub fn closeFocused(self: *Tree) CloseResult {
-        const leaf = self.focused;
+        return self.closeNode(self.focused);
+    }
+
+    /// Close the leaf whose terminal surface is `surface` (its child exited, or
+    /// the user clicked the "process exited" Close button). Returns null if the
+    /// surface isn't in this tree, else the same `CloseResult` as `closeFocused`.
+    pub fn closeSurface(self: *Tree, surface: *Surface) ?CloseResult {
+        const node = self.findLeafForSurface(surface) orelse return null;
+        return self.closeNode(node);
+    }
+
+    /// Collapse `leaf` out of the tree: its sibling takes over the parent split's
+    /// slot. Shared by `closeFocused` and `closeSurface`.
+    fn closeNode(self: *Tree, leaf: *Node) CloseResult {
         if (leaf.* != .leaf) return .collapsed;
 
         const parent = parentOf(self.root, leaf) orelse {
-            // Focused leaf IS the root: closing the last pane.
+            // This leaf IS the root: closing the last pane.
             return .closed_last;
         };
 
@@ -707,10 +751,14 @@ pub const Tree = struct {
         split.paned.setStartChild(null);
         split.paned.setEndChild(null);
 
-        // Tear down the focused leaf (process + node struct). Drop any dangling
+        // Tear down the leaf (process + node struct). Drop any dangling
         // highlight pointer first so the next notify never reads a freed node.
+        // Guard the destroy: `pane.destroy()` re-emits this surface's
+        // close-request, which must not re-enter and double-free this node.
         if (self.highlighted == leaf) self.highlighted = null;
+        self.tearing_down = true;
         leaf.leaf.pane.destroy();
+        self.tearing_down = false;
         self.alloc.destroy(leaf);
 
         // Remove the parent paned widget from wherever it lived (container for
