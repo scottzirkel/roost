@@ -230,9 +230,15 @@ pub const Server = struct {
         defer notification.unref();
         notification.setBody(body_z);
 
-        // Use Ghostty's app icon; falls back gracefully if the theme lacks it.
-        const icon = gio.ThemedIcon.new("dev.scottzirkel.Roost");
+        // Show the AGENT's logo (claude) so the popup is recognizable, not the
+        // generic/Ghostty mark. `claude-desktop` is the icon the Claude Desktop
+        // package installs into the system hicolor theme, so mako resolves it by
+        // name (the same mechanism that makes Ghostty's own icon render). Append
+        // `dev.scottzirkel.Roost` as a fallback for when claude-desktop isn't
+        // installed (renders generic if neither resolves — no worse than before).
+        const icon = gio.ThemedIcon.new("claude-desktop");
         defer icon.unref();
+        icon.appendName("dev.scottzirkel.Roost");
         notification.setIcon(icon.as(gio.Icon));
 
         const gio_app = self.app.as(gio.Application);
