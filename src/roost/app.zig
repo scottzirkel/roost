@@ -232,7 +232,7 @@ pub fn run() !void {
     if (project_dir) |p| project.recordRecent(alloc, p.path);
 
     // Reflect the project in the window title.
-    setWindowTitle(window, project_dir);
+    setWindowTitle(alloc, window, project_dir);
 
     // Load any saved layout. Parsed into an arena that must outlive
     // Workspace.init (which reads the SerNode tree); we free it right after.
@@ -1078,20 +1078,27 @@ fn onSendToAgent(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callco
 
 /// Set the window title to `Roost — <project name>` (basename, falling back to
 /// the full path), or plain `roost` if there is no project. `p` is borrowed.
-fn setWindowTitle(window: *gtk.ApplicationWindow, p: ?Project) void {
+fn setWindowTitle(alloc: std.mem.Allocator, window: *gtk.ApplicationWindow, p: ?Project) void {
     const win = window.as(gtk.Window);
     const proj = p orelse {
         win.setTitle("Roost");
         return;
     };
-    // Build a NUL-terminated "Roost — <name>" on the stack. setTitle copies.
-    var buf: [std.fs.max_path_bytes + 16]u8 = undefined;
     const name = proj.displayName();
-    const title = std.fmt.bufPrintZ(&buf, "Roost — {s}", .{name}) catch {
-        win.setTitle("Roost");
-        return;
-    };
-    win.setTitle(title);
+
+    // Append the checked-out git branch when the project is a repo, e.g.
+    // "Roost — roost · main". Resolved statically here (at open/switch); the
+    // branch slice is owned by `alloc` and freed once setTitle has copied.
+    const branch: ?[]u8 = git.currentBranch(alloc, proj.path);
+    defer if (branch) |b| alloc.free(b);
+
+    // Build a NUL-terminated title on the stack. setTitle copies.
+    var buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    const title = if (branch) |b|
+        std.fmt.bufPrintZ(&buf, "Roost — {s} · {s}", .{ name, b }) catch null
+    else
+        std.fmt.bufPrintZ(&buf, "Roost — {s}", .{name}) catch null;
+    win.setTitle(title orelse "Roost");
 }
 
 /// Open a GTK directory chooser (the chooser's "Open Folder…" action). When the
@@ -1201,7 +1208,7 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
     app_ctx.current = new_project;
     project.recordRecent(alloc, new_project.path);
 
-    setWindowTitle(app_ctx.window, new_project);
+    setWindowTitle(alloc, app_ctx.window, new_project);
     app_ctx.workspace.focusIndex(0);
     app_ctx.workspace.updateHighlight();
 }

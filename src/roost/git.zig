@@ -67,6 +67,40 @@ pub fn repoRoot(alloc: Allocator, dir: []const u8) ?[]u8 {
     return alloc.dupe(u8, trimmed) catch null;
 }
 
+/// Resolve the current branch name of the repo containing `dir`:
+/// `git -C <dir> rev-parse --abbrev-ref HEAD`. On a detached HEAD that command
+/// prints the literal "HEAD", so we fall back to the short commit SHA
+/// (`rev-parse --short HEAD`). Returns the trimmed name (owned by `alloc`), or
+/// null if `dir` is not in a git work tree or git is unavailable.
+pub fn currentBranch(alloc: Allocator, dir: []const u8) ?[]u8 {
+    const out = run(alloc, &.{ "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD" }) catch |err| {
+        log.warn("git rev-parse --abbrev-ref failed to run err={}", .{err});
+        return null;
+    };
+    defer alloc.free(out.stdout);
+    defer alloc.free(out.stderr);
+
+    if (out.code != 0) return null;
+
+    const trimmed = std.mem.trim(u8, out.stdout, &std.ascii.whitespace);
+    if (trimmed.len == 0) return null;
+    // Detached HEAD: report the short SHA instead of the placeholder "HEAD".
+    if (std.mem.eql(u8, trimmed, "HEAD")) return shortHead(alloc, dir);
+    return alloc.dupe(u8, trimmed) catch null;
+}
+
+/// `git -C <dir> rev-parse --short HEAD` → owned short SHA, or null on error /
+/// empty repo (no commits yet).
+fn shortHead(alloc: Allocator, dir: []const u8) ?[]u8 {
+    const out = run(alloc, &.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }) catch return null;
+    defer alloc.free(out.stdout);
+    defer alloc.free(out.stderr);
+    if (out.code != 0) return null;
+    const trimmed = std.mem.trim(u8, out.stdout, &std.ascii.whitespace);
+    if (trimmed.len == 0) return null;
+    return alloc.dupe(u8, trimmed) catch null;
+}
+
 /// Create a new worktree+branch:
 /// `git -C <repo_root> worktree add <dest> -b <branch>`.
 ///
