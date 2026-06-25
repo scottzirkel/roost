@@ -930,15 +930,19 @@ pub const Tree = struct {
     }
 
     /// Swap two leaves' positions in the tree: exchange their GTK slots and the
-    /// node pointers in their parent splits. Each pane resizes to fill the
-    /// other's old slot; per-paned divider positions are untouched. Both nodes
+    /// node pointers in their parent splits. Sizes travel WITH the panes — a
+    /// short pane swapped above a long one stays short — by restoring each
+    /// pane's pre-swap extent in its new slot (see `restoreGeo`). Both nodes
     /// must be non-root (always true when found via `findInDirection`, which
     /// only returns a target when there are ≥2 panes).
     fn swapNodes(self: *Tree, a: *Node, b: *Node) void {
         if (a == b) return;
-        // Capture both slots BEFORE mutating — slotOf walks the live tree.
+        // Capture both slots and geometry BEFORE mutating — these walk the
+        // live tree and read live widget allocations.
         const slot_a = self.slotOf(a);
         const slot_b = self.slotOf(b);
+        const geo_a = self.captureGeo(a);
+        const geo_b = self.captureGeo(b);
         // Hold a ref on each widget so detaching it from its paned (which drops
         // the paned's reference) doesn't finalize it before we re-attach.
         const a_obj = a.widget().as(gobject.Object);
@@ -951,6 +955,60 @@ pub const Tree = struct {
         self.detachSlot(slot_b);
         self.attach(slot_a, b);
         self.attach(slot_b, a);
+
+        // Restore sizes so each pane keeps its own. When both panes share one
+        // parent (a sibling swap) a single divider set is exact — the start
+        // child's size fixes the end child's remainder — so drive it from the
+        // start-slot pane only. Otherwise restore each within its own parent.
+        const pa = parentOf(self.root, a);
+        const pb = parentOf(self.root, b);
+        if (pa != null and pa == pb) {
+            if (pa.?.split.start == a) self.restoreGeo(a, geo_a) else self.restoreGeo(b, geo_b);
+        } else {
+            self.restoreGeo(a, geo_a);
+            self.restoreGeo(b, geo_b);
+        }
+    }
+
+    /// Pre-swap geometry of a leaf: its parent split's orientation (null if the
+    /// node is the tree root) and its pixel extent. Captured before a swap so
+    /// `restoreGeo` can make a pane's size follow it across the move.
+    const LeafGeo = struct {
+        parent_orientation: ?gtk.Orientation,
+        w: c_int,
+        h: c_int,
+    };
+
+    fn captureGeo(self: *Tree, node: *Node) LeafGeo {
+        const wdg = node.widget();
+        const parent = parentOf(self.root, node);
+        return .{
+            .parent_orientation = if (parent) |p| p.split.orientation else null,
+            .w = wdg.getWidth(),
+            .h = wdg.getHeight(),
+        };
+    }
+
+    /// Set `node`'s new parent divider so the pane regains its captured extent.
+    /// Restores ONLY along an orientation the pane keeps across the move (its
+    /// old and new parent agree): that covers sibling swaps and same-axis
+    /// neighbors, where the moved-into slot's size is exactly what changed.
+    /// Cross-orientation moves fall back to slot sizing — "keep size" is
+    /// ill-defined there and restoring would squish uninvolved bystanders.
+    fn restoreGeo(self: *Tree, node: *Node, geo: LeafGeo) void {
+        const parent = parentOf(self.root, node) orelse return;
+        const split = &parent.split;
+        const old_o = geo.parent_orientation orelse return;
+        if (old_o != split.orientation) return;
+        const o = split.orientation;
+        const wdg = split.paned.as(gtk.Widget);
+        const extent: c_int = if (o == .horizontal) wdg.getWidth() else wdg.getHeight();
+        const size: c_int = if (o == .horizontal) geo.w else geo.h;
+        if (extent <= 1 or size <= 0) return;
+        // Divider position = the start child's size; the end child gets the
+        // remainder (handle width ignored, matching liveRatio's pos/extent).
+        const pos: c_int = if (split.start == node) size else extent - size;
+        split.paned.setPosition(std.math.clamp(pos, 1, extent - 1));
     }
 
     // --- Persistence ------------------------------------------------------
