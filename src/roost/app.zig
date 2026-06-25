@@ -526,6 +526,27 @@ fn doQuit(a: *AppContext) void {
     a.window.as(gtk.Window).close();
 }
 
+/// `win.reload` (Ctrl+Shift+Q): restart into the latest built binary. Native
+/// code can't hot-swap, so "reload" = clean restart: persist the layout, spawn a
+/// fresh DETACHED instance of our own exe (which `./build.sh` overwrites in
+/// place) for the SAME project, then quit this one. The child reads the layout
+/// we just wrote, so the pane arrangement (roles, splits, sizes) is restored;
+/// per-pane process state (shells, the agent, scrollback) starts fresh — that's
+/// unavoidable across a process restart. If the spawn fails we stay put rather
+/// than quit into nothing.
+fn onReload(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    saveLayout(a);
+    log.info("reloading roost (restart into latest build)", .{});
+    if (!openProjectNewWindow(a, a.current.path)) {
+        log.warn("reload aborted: could not spawn replacement instance", .{});
+        return;
+    }
+    // Replacement is launching detached; tear this instance down without the
+    // quit confirmation (the user explicitly asked to reload).
+    a.quit_confirmed = true;
+    a.window.as(gtk.Window).close();
+}
+
 /// Serialize the current workspace tree to the layout file keyed by the current
 /// project path (per-worktree persistence). Best-effort.
 fn saveLayout(app_ctx: *AppContext) void {
@@ -682,6 +703,9 @@ fn setupShortcuts(
     // Reset the whole layout to the default 2x2.
     addAction(map, "reset-layout", onResetLayout, app_ctx);
 
+    // Reload: restart into the latest built binary (Ctrl+Shift+Q).
+    addAction(map, "reload", onReload, app_ctx);
+
     // Open the project/worktree chooser (Ctrl+O). App-level (on the GApplication,
     // not the window) so a remote second desktop launch can forward to it.
     addAction(gtk_app.as(gio.Application).as(gio.ActionMap), "present-chooser", onPresentChooser, app_ctx);
@@ -749,6 +773,10 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
     setAccel(gtk_app, "win.toggle-follow-mouse", "<Ctrl><Shift>M");
+
+    // Reload: Ctrl+Shift+Q restarts into the latest build (pairs with Ctrl+Q
+    // quit). Run ./build.sh first; this only swaps the process, not the binary.
+    setAccel(gtk_app, "win.reload", "<Ctrl><Shift>q");
 
     // Quit: Ctrl+Q reuses the existing `win.close` action (clean shutdown +
     // layout save, both via onWindowCloseRequest).
@@ -1157,7 +1185,7 @@ fn onSwitchResponse(
     if (std.mem.orderZ(u8, "switch", response) == .eq) {
         rebuildWorkspace(a, req.path);
     } else if (std.mem.orderZ(u8, "newwin", response) == .eq) {
-        openProjectNewWindow(a, req.path);
+        _ = openProjectNewWindow(a, req.path);
     }
 }
 
@@ -1356,6 +1384,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Enter", .text = "Send scratchpad selection → agent" },
     .{ .keys = "Ctrl+Shift+M", .text = "Toggle focus-follows-mouse (on by default)" },
     .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
+    .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build" },
     .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
 };
 
@@ -1464,18 +1493,20 @@ const ChooserState = struct {
 /// `--gtk-single-instance=false` so it gets its own window instead of forwarding
 /// to us). No controlling terminal is attached, so nothing is left "stray".
 /// `ROOST_PROJECT` carries the target dir; the desktop-launch marker is dropped
-/// so the child resolves the project from that env, not recents.
-fn openProjectNewWindow(a: *AppContext, path: []const u8) void {
+/// so the child resolves the project from that env, not recents. Returns true if
+/// the detached child was spawned (callers that quit afterward — e.g. `reload` —
+/// must NOT quit on false, or they'd leave the user with no window).
+fn openProjectNewWindow(a: *AppContext, path: []const u8) bool {
     const alloc = a.alloc;
     const exe = std.fs.selfExePathAlloc(alloc) catch |err| {
         log.warn("cannot resolve own exe path err={}", .{err});
-        return;
+        return false;
     };
     defer alloc.free(exe);
 
-    var env = std.process.getEnvMap(alloc) catch return;
+    var env = std.process.getEnvMap(alloc) catch return false;
     defer env.deinit();
-    env.put("ROOST_PROJECT", path) catch return;
+    env.put("ROOST_PROJECT", path) catch return false;
     env.remove("GIO_LAUNCHED_DESKTOP_FILE_PID");
 
     // sh backgrounds a setsid'd child and exits immediately, so the new window
@@ -1491,9 +1522,10 @@ fn openProjectNewWindow(a: *AppContext, path: []const u8) void {
     child.stderr_behavior = .Ignore;
     _ = child.spawnAndWait() catch |err| {
         log.warn("could not spawn new roost window err={}", .{err});
-        return;
+        return false;
     };
     log.info("opened new window for {s}", .{path});
+    return true;
 }
 
 /// Build + present the project/worktree chooser: a scrollable list of recent
@@ -1652,7 +1684,7 @@ fn onChooserResponse(
         if (st.list_box.getSelectedRow()) |row| {
             const idx = row.getIndex();
             if (idx >= 0 and @as(usize, @intCast(idx)) < st.paths.len) {
-                openProjectNewWindow(a, st.paths[@intCast(idx)]);
+                _ = openProjectNewWindow(a, st.paths[@intCast(idx)]);
             }
         }
     } else if (std.mem.orderZ(u8, "open", resp) == .eq) {
