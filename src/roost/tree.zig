@@ -315,8 +315,15 @@ pub const Tree = struct {
                         .vertical
                     else
                         return error.Invalid;
+                // If a deeper node is invalid (or makeSplit OOMs), free the
+                // children already built so the partial subtree doesn't leak.
+                // Safe to tear down here: close_cb is still null during the
+                // build (callers connect it after init), so makeLeaf hasn't
+                // wired any surface close-request handler that could re-enter.
                 const start = try self.buildFromSer(s.start);
+                errdefer self.destroyNode(start);
                 const end = try self.buildFromSer(s.end);
+                errdefer self.destroyNode(end);
                 const ratio = std.math.clamp(s.ratio, 0.05, 0.95);
                 return self.makeSplit(orientation, start, end, ratio);
             },
