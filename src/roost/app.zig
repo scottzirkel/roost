@@ -27,6 +27,7 @@ const state = &@import("../global.zig").state;
 const Application = @import("../apprt/gtk/class/application.zig").Application;
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const internal_os = @import("../os/main.zig");
+const Config = @import("config.zig").Config;
 
 const layout = @import("layout.zig");
 const Workspace = layout.Workspace;
@@ -53,6 +54,9 @@ const AppContext = struct {
     /// Stable storage for the live workspace. Shortcut actions capture this
     /// pointer; rebuilds mutate `workspace.*` in place so they stay valid.
     workspace: *Workspace,
+    /// User settings (audio, scratchpad persistence). Lives in the run frame;
+    /// the settings UI mutates it in place and calls `Config.save`.
+    config: *Config,
     /// The current project. Owns its path; replaced (old freed) on rebuild.
     current: Project,
     /// One-shot bypass for the quit confirmation: `onWindowCloseRequest` vetoes
@@ -263,6 +267,11 @@ pub fn run() !void {
     //     server only dereferences `&workspace` when an event fires, which can
     //     only happen once we're in the run loop (after the assignment). The
     //     stack address of `workspace` is stable for the whole run.
+    // Load Roost's user settings (audio, scratchpad persistence). Lives in this
+    // frame for the whole run; the settings UI mutates it via `&cfg` and saves.
+    var cfg = Config.load(alloc);
+    defer cfg.deinit();
+
     var workspace: Workspace = undefined;
     var server: ipc.Server = undefined;
     var have_server = false;
@@ -288,6 +297,7 @@ pub fn run() !void {
         .git_cmd = git_cmd,
         .agent_cmd = agent_cmd,
         .workspace = &workspace,
+        .config = &cfg,
         .current = project_dir orelse .{ .alloc = alloc, .path = "" },
     };
     defer if (app_ctx.current.path.len > 0) app_ctx.current.deinit();
