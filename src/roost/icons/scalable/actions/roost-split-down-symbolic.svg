@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Filled shapes only (see split-right). Existing pane dimmed; the NEW pane
+       (added below) is solid. The 1px gap reads as the divider. -->
+  <g fill="#2e3436">
+    <rect x="2.5" y="1.5" width="11" height="6" rx="1" opacity="0.4"/>
+    <rect x="2.5" y="8.5" width="11" height="6" rx="1"/>
+  </g>
+</svg>

@@ -306,6 +306,12 @@ pub fn run() !void {
     const gtk_app = gapp.as(gtk.Application);
     setupShortcuts(window, gtk_app, &workspace, &app_ctx);
 
+    // Header bar (set after shortcuts so its buttons' actions exist). It's the
+    // window titlebar, so it persists across workspace rebuilds. Register our
+    // bundled icons first so the bar's split buttons can resolve them.
+    registerBundledIcons(window);
+    installHeaderBar(window);
+
     // 8. Present and focus the first leaf (the default 2x2 makes that the Agent
     //    pane; a restored layout focuses whatever leaf comes first in tree
     //    order). We do NOT force-maximize: on a tiling WM (Hyprland) the window
@@ -400,6 +406,71 @@ fn onCloseAction(_: *gio.SimpleAction, _: ?*glib.Variant, window: *gtk.Window) c
 /// widget). `ws` is `&workspace`, updated in place across rebuilds.
 fn onWindowFocusChanged(_: *gtk.ApplicationWindow, _: *gobject.ParamSpec, ws: *Workspace) callconv(.c) void {
     ws.updateHighlight();
+}
+
+/// Bytes of the GResource holding Roost's bundled symbolic icons, compiled by
+/// build.sh (glib-compile-resources) and embedded so the binary is self-
+/// contained — Roost never depends on the user's installed icon theme.
+const bundled_icons = @embedFile("icons.gresource");
+
+/// Register the bundled icons so the icon theme resolves them by name (with the
+/// usual symbolic recoloring). Call once, before building the header bar.
+fn registerBundledIcons(window: *gtk.ApplicationWindow) void {
+    const data = glib.Bytes.new(bundled_icons.ptr, bundled_icons.len);
+    defer data.unref();
+    var gerr: ?*glib.Error = null;
+    const resource = gio.Resource.newFromData(data, &gerr) orelse {
+        if (gerr) |e| {
+            log.warn("could not load bundled icons: {s}", .{e.f_message orelse "(unknown)"});
+            e.free();
+        }
+        return;
+    };
+    gio.resourcesRegister(resource);
+    const theme = gtk.IconTheme.getForDisplay(window.as(gtk.Widget).getDisplay());
+    theme.addResourcePath("/dev/scottzirkel/roost/icons");
+}
+
+/// Build the window's header bar: a focus-follows-mouse toggle + a Help button,
+/// each wired to its existing `win.*` action (so the buttons and the keyboard
+/// share state — the FFM toggle reflects the stateful action). Set as the window
+/// titlebar so it persists across workspace rebuilds (which only swap the child).
+fn installHeaderBar(window: *gtk.ApplicationWindow) void {
+    const bar = gtk.HeaderBar.new();
+    // Hide the CSD min/max/close controls: on a tiling WM the WM + Ctrl+Q manage
+    // the window, and it keeps the bar minimal.
+    bar.setShowTitleButtons(0);
+
+    // Layout actions on the LEFT: split the focused pane right / down. The arrow
+    // points where the new pane lands. (Yaru/Adwaita lack a clean split glyph, so
+    // we use reliable directional arrows + tooltips.)
+    const split_r = gtk.Button.new();
+    split_r.setIconName("roost-split-right-symbolic");
+    split_r.as(gtk.Widget).setTooltipText("Add pane right (Ctrl+Shift+R)");
+    split_r.as(gtk.Actionable).setActionName("win.split-h");
+    bar.packStart(split_r.as(gtk.Widget));
+
+    const split_d = gtk.Button.new();
+    split_d.setIconName("roost-split-down-symbolic");
+    split_d.as(gtk.Widget).setTooltipText("Add pane down (Ctrl+Shift+D)");
+    split_d.as(gtk.Actionable).setActionName("win.split-v");
+    bar.packStart(split_d.as(gtk.Widget));
+
+    // Focus-follows-mouse toggle — reflects + drives the stateful action.
+    const ffm = gtk.ToggleButton.new();
+    ffm.as(gtk.Button).setIconName("roost-mouse-symbolic");
+    ffm.as(gtk.Widget).setTooltipText("Focus follows mouse (Ctrl+Shift+M)");
+    ffm.as(gtk.Actionable).setActionName("win.toggle-follow-mouse");
+    bar.packEnd(ffm.as(gtk.Widget));
+
+    // Help / cheat-sheet.
+    const help = gtk.Button.new();
+    help.setIconName("roost-help-symbolic");
+    help.as(gtk.Widget).setTooltipText("Keyboard shortcuts (Ctrl+Shift+/)");
+    help.as(gtk.Actionable).setActionName("win.show-help");
+    bar.packEnd(help.as(gtk.Widget));
+
+    window.as(gtk.Window).setTitlebar(bar.as(gtk.Widget));
 }
 
 /// Install the app-level CSS for the pane frames + active-pane indicator. Every
@@ -624,8 +695,18 @@ fn setupShortcuts(
     // Keyboard cheat-sheet (Ctrl+Shift+/).
     addAction(map, "show-help", onShowHelp, app_ctx);
 
-    // Toggle focus-follows-mouse (Ctrl+Shift+M).
-    addAction(map, "toggle-follow-mouse", onToggleFollowMouse, app_ctx);
+    // Toggle focus-follows-mouse (Ctrl+Shift+M). STATEFUL boolean action so the
+    // header-bar toggle button and the accelerator share one source of truth.
+    {
+        const ffm = gio.SimpleAction.newStateful(
+            "toggle-follow-mouse",
+            null,
+            glib.Variant.newBoolean(@intFromBool(tree.followMouseEnabled())),
+        );
+        defer ffm.unref();
+        _ = gio.SimpleAction.signals.activate.connect(ffm, *AppContext, onToggleFollowMouse, app_ctx, .{});
+        map.addAction(ffm.as(gio.Action));
+    }
 
     // Accelerators.
     setAccel(gtk_app, "win.focus-1", "<Alt>1");
@@ -1337,8 +1418,10 @@ fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(
     presentShortcuts(a);
 }
 
-fn onToggleFollowMouse(_: *gio.SimpleAction, _: ?*glib.Variant, _: *AppContext) callconv(.c) void {
+fn onToggleFollowMouse(action: *gio.SimpleAction, _: ?*glib.Variant, _: *AppContext) callconv(.c) void {
     const on = tree.toggleFollowMouse();
+    // Reflect the new state so the header-bar toggle button updates with us.
+    action.setState(glib.Variant.newBoolean(@intFromBool(on)));
     log.info("focus-follows-mouse {s}", .{if (on) "on" else "off"});
 }
 

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Filled shapes only: GTK's symbolic recolorer forces `fill` on every
+       shape, so outlines must be real fills. The existing pane is dimmed with
+       opacity; the NEW pane (added on the right) is solid. The 1px gap reads
+       as the divider. -->
+  <g fill="#2e3436">
+    <rect x="1.5" y="2.5" width="6" height="11" rx="1" opacity="0.4"/>
+    <rect x="8.5" y="2.5" width="6" height="11" rx="1"/>
+  </g>
+</svg>

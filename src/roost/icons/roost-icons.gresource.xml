@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Bundled symbolic icons for Roost's header bar. Compiled by build.sh into
+  src/roost/icons.gresource (gitignored), @embedFile'd into the binary, and
+  registered at runtime; the icon theme then resolves them by name with normal
+  symbolic recoloring. So Roost never depends on the user's installed icon set.
+
+  Resource layout matches the icon-theme directory structure, so
+  `IconTheme.add_resource_path("/dev/scottzirkel/roost/icons")` finds e.g.
+  "roost-split-right-symbolic" at scalable/actions/.
+-->
+<gresources>
+  <gresource prefix="/dev/scottzirkel/roost/icons">
+    <file>scalable/actions/roost-split-right-symbolic.svg</file>
+    <file>scalable/actions/roost-split-down-symbolic.svg</file>
+    <file>scalable/actions/roost-mouse-symbolic.svg</file>
+    <file>scalable/actions/roost-help-symbolic.svg</file>
+  </gresource>
+</gresources>

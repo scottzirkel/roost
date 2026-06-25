@@ -43,6 +43,11 @@ pub fn toggleFollowMouse() bool {
     return follow_mouse;
 }
 
+/// Current focus-follows-mouse state (to initialize UI that reflects it).
+pub fn followMouseEnabled() bool {
+    return follow_mouse;
+}
+
 /// The semantic roles a pane can have. Extensible: add a variant + its `title`
 /// and `spawn` behavior (in `Tree.spawnPane`) and everything else follows.
 pub const Role = enum {

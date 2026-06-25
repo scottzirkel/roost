@@ -31,6 +31,14 @@ ln -sfn ../../../src/main_roost.zig "$sub/src/main_roost.zig"
 git -C "$sub" checkout -- build.zig 2>/dev/null || true
 git -C "$sub" apply "$root/patches/build.zig.patch"
 
+# 3.5 Compile our bundled header-bar icons into a GResource the binary
+#     @embedFiles (src/roost/icons.gresource is gitignored — it's generated).
+echo "==> compiling bundled icons"
+glib-compile-resources \
+  --sourcedir="$root/src/roost/icons" \
+  --target="$root/src/roost/icons.gresource" \
+  "$root/src/roost/icons/roost-icons.gresource.xml"
+
 # 4. Build. Extra args pass through (e.g. ./build.sh -Doptimize=ReleaseFast).
 echo "==> $ZIG build roost"
 ( cd "$sub" && "$ZIG" build roost "$@" )
