@@ -51,8 +51,9 @@ pub const Workspace = struct {
         agent_cmd: ?[:0]const u8,
         cwd: ?[:0]const u8,
         saved: ?*const tree.SerNode,
+        scratch: tree.ScratchCfg,
     ) Workspace {
-        const t: Tree = buildTree(alloc, git_cmd, agent_cmd, cwd, saved);
+        const t: Tree = buildTree(alloc, git_cmd, agent_cmd, cwd, saved, scratch);
         return .{ .t = t, .root = t.root_widget };
     }
 
@@ -62,16 +63,17 @@ pub const Workspace = struct {
         agent_cmd: ?[:0]const u8,
         cwd: ?[:0]const u8,
         saved: ?*const tree.SerNode,
+        scratch: tree.ScratchCfg,
     ) Tree {
         if (saved) |ser| {
-            if (Tree.initFromSer(alloc, ser, git_cmd, agent_cmd, cwd)) |t| {
+            if (Tree.initFromSer(alloc, ser, git_cmd, agent_cmd, cwd, scratch)) |t| {
                 return t;
             } else |err| {
                 log.warn("saved layout invalid, using default 2x2 err={}", .{err});
             }
         }
         // The default build only fails on OOM; at startup that is fatal anyway.
-        return Tree.initDefault(alloc, git_cmd, agent_cmd, cwd) catch
+        return Tree.initDefault(alloc, git_cmd, agent_cmd, cwd, scratch) catch
             @panic("out of memory building default layout");
     }
 

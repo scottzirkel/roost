@@ -296,7 +296,14 @@ pub fn run() !void {
     }
     defer if (have_server) server.deinit();
 
-    workspace = Workspace.init(alloc, git_cmd, agent_cmd, pane_cwd, saved);
+    // Resolve the scratchpad file for this project (Workspace dupes it, so we
+    // free our copy right after).
+    const scratch_path = cfg.scratchpadPathFor(alloc, pane_cwd orelse "");
+    defer if (scratch_path) |p| alloc.free(p);
+    workspace = Workspace.init(alloc, git_cmd, agent_cmd, pane_cwd, saved, .{
+        .path = scratch_path,
+        .autosave = cfg.scratchpad_autosave,
+    });
     layout_arena.deinit(); // SerNode no longer needed once the tree is built
     workspace.window = window.as(gtk.Window); // for live-focus sync on ops
     window.as(gtk.Window).setChild(workspace.root);
@@ -1078,7 +1085,12 @@ fn onResetLayout(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callco
 fn doResetLayout(a: *AppContext) void {
     log.info("reset-layout: rebuilding default 2x2", .{});
     const cwd: ?[:0]const u8 = if (a.current.path.len > 0) a.current.path else null;
-    var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, null); // null => default 2x2
+    const scratch_path = a.config.scratchpadPathFor(a.alloc, cwd orelse "");
+    defer if (scratch_path) |p| a.alloc.free(p);
+    var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, null, .{ // null => default 2x2
+        .path = scratch_path,
+        .autosave = a.config.scratchpad_autosave,
+    });
     new_ws.window = a.window.as(gtk.Window);
     new_ws.connectCloseRequests(onSurfaceCloseRequest, a);
     a.window.as(gtk.Window).setChild(new_ws.root);
@@ -1228,7 +1240,12 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
         break :blk tree.parseSer(arena.allocator(), bytes);
     };
 
-    var new_ws = Workspace.init(alloc, app_ctx.git_cmd, app_ctx.agent_cmd, new_project.path, saved);
+    const scratch_path = app_ctx.config.scratchpadPathFor(alloc, new_project.path);
+    defer if (scratch_path) |p| alloc.free(p);
+    var new_ws = Workspace.init(alloc, app_ctx.git_cmd, app_ctx.agent_cmd, new_project.path, saved, .{
+        .path = scratch_path,
+        .autosave = app_ctx.config.scratchpad_autosave,
+    });
     new_ws.window = app_ctx.window.as(gtk.Window); // for live-focus sync on ops
     new_ws.connectCloseRequests(onSurfaceCloseRequest, app_ctx);
 
@@ -1636,10 +1653,10 @@ fn presentSettings(a: *AppContext) void {
     // Scratchpad file path. EntryRow emits `apply` when the user confirms (Enter
     // or the apply button), so we persist only on a deliberate edit.
     const path_row = adw.EntryRow.new();
-    path_row.as(adw.PreferencesRow).setTitle("File");
+    path_row.as(adw.PreferencesRow).setTitle("File (empty = per-project .roost/scratchpad.md)");
     path_row.setShowApplyButton(1);
     var pbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&pbuf, "{s}", .{a.config.scratchpad_path}) catch "";
+    const path_z = std.fmt.bufPrintZ(&pbuf, "{s}", .{a.config.scratchpad_override orelse ""}) catch "";
     path_row.as(gtk.Editable).setText(path_z);
     _ = adw.EntryRow.signals.apply.connect(path_row, *AppContext, onScratchpadPathApplied, a, .{});
     scratch_group.add(path_row.as(gtk.Widget));

@@ -27,21 +27,21 @@ pub const Config = struct {
     /// Play a sound on agent events (done / needs-input). Default off so a fresh
     /// install is quiet; pairs with the silent `gio.Notification` in `ipc.zig`.
     audio_notifications: bool = false,
-    /// Persist the scratchpad pane's contents to `scratchpad_path` (load on
-    /// open, autosave on edit). Default on.
+    /// Persist the scratchpad pane's contents to its file (load on open, autosave
+    /// on edit). Default on.
     scratchpad_autosave: bool = true,
-    /// Where the scratchpad is saved/loaded. Always a resolved, owned, absolute
-    /// path after `load` (default `<xdg-config>/roost/scratchpad.md`).
-    scratchpad_path: []const u8 = "",
+    /// Optional explicit scratchpad file path (owned). When null the path is
+    /// per-project: `<project>/.roost/scratchpad.md` (see `scratchpadPathFor`).
+    /// Set this to share one scratchpad across all projects instead.
+    scratchpad_override: ?[]const u8 = null,
 
     /// Load the config, applying file overrides on top of the defaults. Never
     /// fails: a missing/unreadable file yields the defaults. The returned Config
-    /// owns `scratchpad_path` and must be `deinit`'d.
+    /// owns its heap strings and must be `deinit`'d.
     pub fn load(alloc: Allocator) Config {
         var cfg: Config = .{
             .alloc = alloc,
             .agent = alloc.dupeZ(u8, "claude") catch "claude",
-            .scratchpad_path = defaultScratchpadPath(alloc),
         };
 
         const path = configPath(alloc) catch return cfg;
@@ -53,16 +53,26 @@ pub const Config = struct {
         defer alloc.free(bytes);
 
         cfg.parse(bytes);
-        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_path='{s}'", .{
-            cfg.agent, cfg.focus_follows_mouse, cfg.audio_notifications, cfg.scratchpad_autosave, cfg.scratchpad_path,
+        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_override='{s}'", .{
+            cfg.agent, cfg.focus_follows_mouse, cfg.audio_notifications, cfg.scratchpad_autosave, cfg.scratchpad_override orelse "(per-project)",
         });
         return cfg;
     }
 
     pub fn deinit(self: *Config) void {
         self.alloc.free(self.agent);
-        self.alloc.free(self.scratchpad_path);
+        if (self.scratchpad_override) |o| self.alloc.free(o);
         self.* = undefined;
+    }
+
+    /// The effective scratchpad file for `project_path`: the explicit
+    /// `scratchpad_override` if set, else `<project>/.roost/scratchpad.md`. Returns
+    /// null (no persistence) when there is no override AND no project. Caller owns
+    /// the result.
+    pub fn scratchpadPathFor(self: *const Config, alloc: Allocator, project_path: []const u8) ?[]u8 {
+        if (self.scratchpad_override) |o| return alloc.dupe(u8, o) catch null;
+        if (project_path.len == 0) return null;
+        return std.fs.path.join(alloc, &.{ project_path, ".roost", "scratchpad.md" }) catch null;
     }
 
     /// Replace `agent` with an owned NUL-terminated copy of `new_agent`, freeing
@@ -75,15 +85,20 @@ pub const Config = struct {
         self.agent = dup;
     }
 
-    /// Replace `scratchpad_path` with an owned copy of `new_path` (resolving `~`
-    /// + relative paths), freeing the previous value. No-op on empty input or
-    /// OOM. Used by the settings UI before `save`.
+    /// Set (or clear) the explicit scratchpad override. An empty value clears it
+    /// → back to the per-project default. A non-empty value is stored resolved
+    /// (`~` + relative expanded). Frees any previous override. Used by the
+    /// settings UI before `save`.
     pub fn setScratchpadPath(self: *Config, new_path: []const u8) void {
         const trimmed = std.mem.trim(u8, new_path, " \t");
-        if (trimmed.len == 0) return;
+        if (trimmed.len == 0) {
+            if (self.scratchpad_override) |o| self.alloc.free(o);
+            self.scratchpad_override = null;
+            return;
+        }
         const resolved = resolvePath(self.alloc, trimmed) orelse return;
-        self.alloc.free(self.scratchpad_path);
-        self.scratchpad_path = resolved;
+        if (self.scratchpad_override) |o| self.alloc.free(o);
+        self.scratchpad_override = resolved;
     }
 
     fn parse(self: *Config, bytes: []const u8) void {
@@ -141,7 +156,8 @@ pub const Config = struct {
         try w.print("focus-follows-mouse = {s}\n", .{boolStr(self.focus_follows_mouse)});
         try w.print("audio-notifications = {s}\n", .{boolStr(self.audio_notifications)});
         try w.print("scratchpad-autosave = {s}\n", .{boolStr(self.scratchpad_autosave)});
-        try w.print("scratchpad-path = {s}\n", .{self.scratchpad_path});
+        // Empty = per-project default (<project>/.roost/scratchpad.md).
+        try w.print("scratchpad-path = {s}\n", .{self.scratchpad_override orelse ""});
 
         try std.fs.cwd().writeFile(.{ .sub_path = path, .data = buf.items });
         log.info("saved config ({d} bytes)", .{buf.items.len});
@@ -182,14 +198,4 @@ fn configPath(alloc: Allocator) ![]u8 {
     const dir = try internal_os.xdg.config(alloc, .{ .subdir = "roost" });
     defer alloc.free(dir);
     return std.fs.path.join(alloc, &.{ dir, "config" });
-}
-
-/// `<xdg-config>/roost/scratchpad.md`. Caller owns. Falls back to a relative
-/// name only if the xdg lookup fails (never expected).
-fn defaultScratchpadPath(alloc: Allocator) []const u8 {
-    const dir = internal_os.xdg.config(alloc, .{ .subdir = "roost" }) catch
-        return alloc.dupe(u8, "scratchpad.md") catch "";
-    defer alloc.free(dir);
-    return std.fs.path.join(alloc, &.{ dir, "scratchpad.md" }) catch
-        alloc.dupe(u8, "scratchpad.md") catch "";
 }

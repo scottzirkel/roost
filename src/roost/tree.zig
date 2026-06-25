@@ -131,11 +131,19 @@ pub const Pane = union(enum) {
     fn destroy(self: *Pane) void {
         switch (self.*) {
             .terminal => |*t| t.destroy(),
-            // ScratchpadPane has no process to tear down; GTK frees the widget
-            // tree when it is unparented and unreffed.
-            .scratchpad => {},
+            // Flush any pending autosave + free the pane's path. GTK frees the
+            // widget tree itself when it is unparented and unreffed.
+            .scratchpad => |*s| s.destroy(),
         }
     }
+};
+
+/// Persistence config for scratchpad panes, threaded from the caller. `path` is
+/// borrowed at construction; the Tree dupes it into owned storage (panes can be
+/// added after init, so it must outlive the call).
+pub const ScratchCfg = struct {
+    path: ?[]const u8 = null,
+    autosave: bool = true,
 };
 
 /// A leaf node: one pane plus its labeled header box.
@@ -222,6 +230,11 @@ pub const Tree = struct {
     agent_cmd: ?[:0]const u8,
     /// Working directory new terminal panes start in (null inherits default).
     cwd: ?[:0]const u8,
+    /// Persistence file for scratchpad panes (OWNED; freed on deinit). null
+    /// disables load/save. Each scratchpad pane dupes this for its own use.
+    scratch_path: ?[]u8 = null,
+    /// Whether scratchpad panes autosave on edit.
+    scratch_autosave: bool = true,
 
     /// Connected per-surface close-request handler, re-applied to every new
     /// terminal pane so a child process exiting never closes the window.
@@ -236,16 +249,16 @@ pub const Tree = struct {
 
     /// Build the DEFAULT 2x2 layout (first run / no saved state):
     ///   Agent (top-left) / Shell (bottom-left) | Git (top-right) / Scratchpad
-    pub fn initDefault(alloc: Allocator, git_cmd: ?[:0]const u8, agent_cmd: ?[:0]const u8, cwd: ?[:0]const u8) Allocator.Error!Tree {
-        var self = newEmpty(alloc, git_cmd, agent_cmd, cwd);
+    pub fn initDefault(alloc: Allocator, git_cmd: ?[:0]const u8, agent_cmd: ?[:0]const u8, cwd: ?[:0]const u8, scratch: ScratchCfg) Allocator.Error!Tree {
+        var self = newEmpty(alloc, git_cmd, agent_cmd, cwd, scratch);
 
         const agent = try self.makeLeaf(.agent);
         const shell = try self.makeLeaf(.shell);
         const git = try self.makeLeaf(.git);
-        const scratch = try self.makeLeaf(.scratchpad);
+        const scratch_leaf = try self.makeLeaf(.scratchpad);
 
         const left = try self.makeSplit(.vertical, agent, shell, 0.5);
-        const right = try self.makeSplit(.vertical, git, scratch, 0.5);
+        const right = try self.makeSplit(.vertical, git, scratch_leaf, 0.5);
         const outer = try self.makeSplit(.horizontal, left, right, 0.5);
 
         self.setRoot(outer);
@@ -255,10 +268,13 @@ pub const Tree = struct {
 
     /// Construct the Tree shell (allocator, container box, fields) with no root
     /// node attached yet. Callers fill `root`/`focused` via `setRoot`.
-    fn newEmpty(alloc: Allocator, git_cmd: ?[:0]const u8, agent_cmd: ?[:0]const u8, cwd: ?[:0]const u8) Tree {
+    fn newEmpty(alloc: Allocator, git_cmd: ?[:0]const u8, agent_cmd: ?[:0]const u8, cwd: ?[:0]const u8, scratch: ScratchCfg) Tree {
         const container = gtk.Box.new(.vertical, 0);
         container.as(gtk.Widget).setVexpand(1);
         container.as(gtk.Widget).setHexpand(1);
+        // Dupe the scratchpad path into owned storage: panes can be created after
+        // init (add-scratchpad), so it must outlive this call.
+        const owned_scratch: ?[]u8 = if (scratch.path) |p| (alloc.dupe(u8, p) catch null) else null;
         return .{
             .alloc = alloc,
             .root = undefined,
@@ -268,6 +284,8 @@ pub const Tree = struct {
             .git_cmd = git_cmd,
             .agent_cmd = agent_cmd,
             .cwd = cwd,
+            .scratch_path = owned_scratch,
+            .scratch_autosave = scratch.autosave,
         };
     }
 
@@ -296,8 +314,9 @@ pub const Tree = struct {
         git_cmd: ?[:0]const u8,
         agent_cmd: ?[:0]const u8,
         cwd: ?[:0]const u8,
+        scratch: ScratchCfg,
     ) !Tree {
-        var self = newEmpty(alloc, git_cmd, agent_cmd, cwd);
+        var self = newEmpty(alloc, git_cmd, agent_cmd, cwd, scratch);
         const root = try self.buildFromSer(ser);
         self.setRoot(root);
         // Focus the first leaf in tree order.
@@ -349,6 +368,9 @@ pub const Tree = struct {
 
         const lb = labeledBox(role, pane.widget());
         node.* = .{ .leaf = .{ .role = role, .pane = pane, .box = lb.box, .label = lb.label } };
+        // Autosave wiring needs the pane's FINAL address (it was moved into the
+        // node above), so connect the scratchpad's `changed` handler here.
+        if (node.leaf.pane == .scratchpad) node.leaf.pane.scratchpad.wire();
         // Focus-follows-mouse: focus this leaf when the pointer enters its box.
         attachFollowMouse(node, lb.box);
         return node;
@@ -380,7 +402,7 @@ pub const Tree = struct {
                 .cwd = self.cwd,
                 .title = role.title(),
             }) },
-            .scratchpad => .{ .scratchpad = ScratchpadPane.init() },
+            .scratchpad => .{ .scratchpad = ScratchpadPane.init(self.alloc, self.scratch_path, self.scratch_autosave) },
         };
     }
 
@@ -452,6 +474,7 @@ pub const Tree = struct {
         // teardown so the handler ignores them all (we're freeing the tree).
         self.tearing_down = true;
         self.destroyNode(self.root);
+        if (self.scratch_path) |p| self.alloc.free(p);
         self.* = undefined;
     }
 
