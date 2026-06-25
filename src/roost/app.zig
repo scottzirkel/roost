@@ -500,10 +500,11 @@ fn registerBundledIcons(window: *gtk.ApplicationWindow) void {
     theme.addResourcePath("/dev/scottzirkel/roost/icons");
 }
 
-/// Build the window's header bar: a focus-follows-mouse toggle + a Help button,
-/// each wired to its existing `win.*` action (so the buttons and the keyboard
-/// share state — the FFM toggle reflects the stateful action). Set as the window
-/// titlebar so it persists across workspace rebuilds (which only swap the child).
+/// Build the window's header bar: split-right/down on the left, then Help + a
+/// Settings (cog) button on the right, each wired to its `win.*` action. Set as
+/// the window titlebar so it persists across workspace rebuilds (which only swap
+/// the child). Focus-follows-mouse lives in Settings now (and Ctrl+Shift+M), so
+/// it no longer needs its own header button.
 fn installHeaderBar(window: *gtk.ApplicationWindow) void {
     const bar = gtk.HeaderBar.new();
     // Hide the CSD min/max/close controls: on a tiling WM the WM + Ctrl+Q manage
@@ -525,26 +526,19 @@ fn installHeaderBar(window: *gtk.ApplicationWindow) void {
     split_d.as(gtk.Actionable).setActionName("win.split-v");
     bar.packStart(split_d.as(gtk.Widget));
 
-    // Focus-follows-mouse toggle — reflects + drives the stateful action.
-    const ffm = gtk.ToggleButton.new();
-    ffm.as(gtk.Button).setIconName("roost-mouse-symbolic");
-    ffm.as(gtk.Widget).setTooltipText("Focus follows mouse (Ctrl+Shift+M)");
-    ffm.as(gtk.Actionable).setActionName("win.toggle-follow-mouse");
-    bar.packEnd(ffm.as(gtk.Widget));
-
-    // Help / cheat-sheet.
-    const help = gtk.Button.new();
-    help.setIconName("roost-help-symbolic");
-    help.as(gtk.Widget).setTooltipText("Keyboard shortcuts (Ctrl+Shift+/)");
-    help.as(gtk.Actionable).setActionName("win.show-help");
-    bar.packEnd(help.as(gtk.Widget));
-
-    // Settings.
+    // Right side: Help then Settings (cog). packEnd stacks right-to-left, so to
+    // read "Help, cog" left-to-right we pack the cog first (rightmost), then Help.
     const settings = gtk.Button.new();
     settings.setIconName("roost-settings-symbolic");
     settings.as(gtk.Widget).setTooltipText("Settings (Ctrl+,)");
     settings.as(gtk.Actionable).setActionName("win.show-settings");
     bar.packEnd(settings.as(gtk.Widget));
+
+    const help = gtk.Button.new();
+    help.setIconName("roost-help-symbolic");
+    help.as(gtk.Widget).setTooltipText("Keyboard shortcuts (Ctrl+Shift+/)");
+    help.as(gtk.Actionable).setActionName("win.show-help");
+    bar.packEnd(help.as(gtk.Widget));
 
     window.as(gtk.Window).setTitlebar(bar.as(gtk.Widget));
 }
