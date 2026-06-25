@@ -2,15 +2,15 @@
 Type=Application
 Name=Roost
 Comment=Agent command center (Ghostty soft-fork)
-# Launching via this file sets GIO_LAUNCHED_DESKTOP_FILE_PID (-> open last
-# project). We pass --gtk-single-instance=true so a 2nd launch forwards to the
-# running instance's chooser instead of opening another window -- this is
-# REQUIRED because the user's ghostty config sets gtk-single-instance = false,
-# which Roost would otherwise inherit. Bare `cd <dir> && roost` launches omit
-# the flag and stay independent windows. Adjust the path if the binary moves.
-# (The app id dev.scottzirkel.Roost is forced in-process via injectAppId; no
-# --class flag is needed here.)
-Exec=/home/scott/projects/roost/vendor/ghostty/zig-out/bin/roost --gtk-single-instance=true
+# Launching via this file sets GIO_LAUNCHED_DESKTOP_FILE_PID, which Roost uses
+# to (a) open the last project on a fresh launch, or (b) open the project
+# chooser when another instance is already running (so each window picks its
+# own project). Every launch is its OWN process for full isolation -- a hang or
+# crash in one window can never take down the others -- so we do NOT pass
+# --gtk-single-instance (no forwarding to a shared primary). Adjust the path if
+# the binary moves. (The app id dev.scottzirkel.Roost is forced in-process via
+# injectArgs; no --class flag is needed here.)
+Exec=/home/scott/projects/roost/vendor/ghostty/zig-out/bin/roost
 Terminal=false
 Categories=Development;Utility;
 Icon=dev.scottzirkel.Roost

@@ -249,3 +249,38 @@ fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
     const pid = std.os.linux.getpid();
     return std.fmt.allocPrintSentinel(alloc, "{s}/roost-{d}.sock", .{ dir, pid }, 0);
 }
+
+/// The directory roost sockets live in (`$XDG_RUNTIME_DIR`, else `/tmp`).
+fn socketDir() []const u8 {
+    return posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+}
+
+/// True if another roost process is currently alive. Scans the socket dir for
+/// `roost-<pid>.sock` and pings each PID (`kill(pid, 0)`), skipping our own.
+/// Used to decide whether a fresh desktop launch should open the project
+/// chooser (a sibling is running) or just open the last project. Best-effort:
+/// any error is treated as "no sibling" (open normally). Note: this runs before
+/// we create our OWN socket, so there's nothing of ours to skip yet — but we
+/// exclude our PID anyway to stay correct if the call site ever moves.
+pub fn liveSiblingExists() bool {
+    const self_pid = std.os.linux.getpid();
+    var dir = std.fs.openDirAbsolute(socketDir(), .{ .iterate = true }) catch return false;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        const name = entry.name;
+        if (!std.mem.startsWith(u8, name, "roost-")) continue;
+        if (!std.mem.endsWith(u8, name, ".sock")) continue;
+        const pid_str = name["roost-".len .. name.len - ".sock".len];
+        const pid = std.fmt.parseInt(std.os.linux.pid_t, pid_str, 10) catch continue;
+        if (pid == self_pid) continue;
+        // kill(pid, 0): no signal sent, just an existence/permission probe.
+        // Success (or EPERM, which still means it exists) → a sibling is alive.
+        posix.kill(pid, 0) catch |err| switch (err) {
+            error.PermissionDenied => return true,
+            else => continue, // ESRCH (dead) or anything else → not this one
+        };
+        return true;
+    }
+    return false;
+}

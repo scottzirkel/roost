@@ -218,7 +218,15 @@ pub fn run() !void {
     // including the Git/lazygit pane, launch here, so lazygit sees the repo.
     // `Surface.new` dupes the cwd string, so the Project may move/free freely
     // afterward.
-    const project_dir: ?Project = resolveInitialProject(alloc);
+    // A desktop relaunch while another roost is already running opens the
+    // project CHOOSER (each window picks its own project) instead of auto-
+    // opening the last project. A first launch (no sibling) still opens the
+    // last project directly. CLI launches (ROOST_PROJECT/cwd) are unaffected.
+    const open_chooser_on_start = blk: {
+        const has_env = if (std.posix.getenv("ROOST_PROJECT")) |v| v.len > 0 else false;
+        break :blk internal_os.launchedFromDesktop() and !has_env and ipc.liveSiblingExists();
+    };
+    const project_dir: ?Project = if (open_chooser_on_start) null else resolveInitialProject(alloc);
 
     const pane_cwd: ?[:0]const u8 = if (project_dir) |p| p.path else null;
     if (project_dir) |p| project.recordRecent(alloc, p.path);
@@ -1211,6 +1219,12 @@ const SwitchReq = struct {
 /// by the pure-switch entry points (chooser row, Open Folder…). The worktree
 /// CREATE flow keeps its own "Create" dialog as the gate and switches directly.
 fn confirmSwitch(a: *AppContext, new_path: []const u8) void {
+    // Fresh window with no project yet (e.g. the startup relaunch chooser):
+    // nothing to lose, so open the picked project directly — no confirm prompt.
+    if (a.current.path.len == 0) {
+        rebuildWorkspace(a, new_path);
+        return;
+    }
     const path = a.alloc.dupeZ(u8, new_path) catch return;
     const req = a.alloc.create(SwitchReq) catch {
         a.alloc.free(path);
@@ -1695,6 +1709,16 @@ fn presentChooser(a: *AppContext) void {
         .{},
     );
     dialog.choose(a.window.as(gtk.Widget), null, onChooserResponse, cs);
+
+    // Focus the top (most-recent) project row so Enter opens it, rather than the
+    // dialog landing on Cancel. Done after `choose` presents the dialog so the
+    // row widget is realized and can take focus.
+    if (owned.len > 0) {
+        if (list_box.getRowAtIndex(0)) |row0| {
+            list_box.selectRow(row0);
+            _ = row0.as(gtk.Widget).grabFocus();
+        }
+    }
 }
 
 /// True if `needle` already appears in `haystack`.
