@@ -72,20 +72,44 @@ var running: bool = true;
 /// the notification ThemedIcon (ipc.zig) must match this exact string.
 const app_id = "dev.scottzirkel.Roost";
 
-/// Prepend `--class=<app_id>` to this process's argv so Ghostty's config loader
-/// (which parses argv during apprt init) adopts our app id instead of the
-/// default com.mitchellh.ghostty[-debug]. We reassign `std.os.argv` rather than
-/// edit Ghostty source (keeps the additive gate clean). Best-effort: any failure
-/// leaves argv untouched (the app still runs, just under Ghostty's default id).
-fn injectAppId(alloc: std.mem.Allocator) void {
-    const flag = "--class=" ++ app_id;
+/// Flags we force into our own argv before apprt parses config from it:
+///   - `--class=<app_id>`: adopt our dedicated GTK app id instead of Ghostty's
+///     default `com.mitchellh.ghostty[-debug]`.
+///   - `--keybind=ctrl+shift+q=unbind`: drop Ghostty's built-in `ctrl+shift+q →
+///     quit` so our window accelerator (`win.reload`) can claim that chord. The
+///     terminal surface consumes keys it has bindings for before our GTK accels
+///     fire, so without this, Ctrl+Shift+Q never reaches reload. Roost has its
+///     own quit on Ctrl+Q, so removing Ghostty's is no loss — and this only
+///     touches roost's argv, never the user's real Ghostty.
+const injected_flags = [_][:0]const u8{
+    "--class=" ++ app_id,
+    "--keybind=ctrl+shift+q=unbind",
+};
+
+/// Append any `injected_flags` not already present to `std.os.argv` (idempotent,
+/// so it's safe across a reload re-exec, which reuses the already-injected argv).
+/// We reassign `std.os.argv` rather than edit Ghostty source (keeps the additive
+/// gate clean). Best-effort: on alloc failure argv is left untouched.
+fn injectArgs(alloc: std.mem.Allocator) void {
     const old = std.os.argv;
-    for (old) |a| {
-        if (std.mem.eql(u8, std.mem.span(a), flag)) return; // already injected
+    var missing: [injected_flags.len]bool = undefined;
+    var n: usize = 0;
+    for (injected_flags, 0..) |flag, i| {
+        missing[i] = for (old) |a| {
+            if (std.mem.eql(u8, std.mem.span(a), flag)) break false;
+        } else true;
+        if (missing[i]) n += 1;
     }
-    const new = alloc.alloc([*:0]u8, old.len + 1) catch return;
+    if (n == 0) return;
+    const new = alloc.alloc([*:0]u8, old.len + n) catch return;
     @memcpy(new[0..old.len], old);
-    new[old.len] = @constCast(flag);
+    var idx = old.len;
+    for (injected_flags, 0..) |flag, i| {
+        if (missing[i]) {
+            new[idx] = @constCast(flag.ptr);
+            idx += 1;
+        }
+    }
     std.os.argv = new;
 }
 
@@ -98,9 +122,10 @@ pub fn run() !void {
     defer state.deinit();
     const alloc = state.alloc;
 
-    // 1b. Force our own GTK application id (see injectAppId): inject `--class`
-    //     into argv BEFORE apprt init loads config from it. Must precede step 2.
-    injectAppId(alloc);
+    // 1b. Inject our forced flags (see injectArgs): `--class` for the app id and
+    //     `--keybind=ctrl+shift+q=unbind` so reload can use Ctrl+Shift+Q. Must
+    //     run BEFORE apprt init loads config from argv.
+    injectArgs(alloc);
 
     if (comptime builtin.mode == .Debug) {
         log.warn("This is a debug build. Performance will be very poor.", .{});
@@ -526,25 +551,62 @@ fn doQuit(a: *AppContext) void {
     a.window.as(gtk.Window).close();
 }
 
-/// `win.reload` (Ctrl+Shift+Q): restart into the latest built binary. Native
-/// code can't hot-swap, so "reload" = clean restart: persist the layout, spawn a
-/// fresh DETACHED instance of our own exe (which `./build.sh` overwrites in
-/// place) for the SAME project, then quit this one. The child reads the layout
-/// we just wrote, so the pane arrangement (roles, splits, sizes) is restored;
-/// per-pane process state (shells, the agent, scrollback) starts fresh — that's
-/// unavoidable across a process restart. If the spawn fails we stay put rather
-/// than quit into nothing.
+/// `win.reload` (Ctrl+Shift+Q): restart into the latest built binary. Native code
+/// can't hot-swap, so "reload" = RE-EXEC in place: persist the layout, then
+/// `execve` our own freshly-built exe (which `./build.sh` overwrites in place),
+/// reusing our LIVE argv so the single-instance mode and injected `--class`
+/// carry over verbatim. Re-exec keeps our PID — no second process to race, no
+/// flag string to corrupt, no spawn-then-quit timing, no single-instance
+/// forwarding (all of which made the earlier spawn-a-new-window approach flaky).
+/// The new image reads the layout we just wrote, so the arrangement (roles,
+/// splits, sizes) is restored; pane child processes die as their PTYs close on
+/// exec — unavoidable across a restart, and the point of a "reload". On exec
+/// failure we log and stay put rather than leave the user with nothing.
 fn onReload(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    // Reload ends everything running in this window's panes, so confirm first.
+    // Cancel is the default (Esc/Enter cancels) — a stray Ctrl+Shift+Q must not
+    // nuke a live session by reflex.
+    confirmDestructive(
+        a,
+        "Reload Roost?",
+        "Restarts this window into the latest build. Panes reopen from the saved layout, but anything running in them (shells, the agent) ends.",
+        "Reload",
+        doReload,
+        false,
+    );
+}
+
+/// Confirmed reload: persist the layout, then re-exec into the latest build.
+fn doReload(a: *AppContext) void {
     saveLayout(a);
-    log.info("reloading roost (restart into latest build)", .{});
-    if (!openProjectNewWindow(a, a.current.path)) {
-        log.warn("reload aborted: could not spawn replacement instance", .{});
+    log.info("reloading roost (re-exec into latest build)", .{});
+    reExecSelf(a) catch |err| {
+        log.warn("reload failed; staying put err={}", .{err});
         return;
-    }
-    // Replacement is launching detached; tear this instance down without the
-    // quit confirmation (the user explicitly asked to reload).
-    a.quit_confirmed = true;
-    a.window.as(gtk.Window).close();
+    };
+    // execve does not return on success — anything past here means it failed.
+}
+
+/// Replace this process image with our freshly-built exe (see `onReload`).
+/// Returns only on failure; on success `execve` never returns.
+fn reExecSelf(a: *AppContext) !void {
+    const alloc = a.alloc;
+    // Keep the same project across the swap (mirrors openProjectNewWindow's env).
+    if (a.current.path.len > 0) _ = internal_os.setenv("ROOST_PROJECT", a.current.path);
+
+    // Re-exec the path we were LAUNCHED from (argv[0]), reusing our live argv so
+    // the single-instance mode + injected `--class` carry over verbatim. We must
+    // NOT use /proc/self/exe (std.fs.selfExePath): once `./build.sh` replaces the
+    // binary, that link resolves to the deleted old inode ("… (deleted)") and
+    // execve fails with FileNotFound. argv[0] is a plain path string, so it still
+    // points at the freshly-built file at that location.
+    const argc = std.os.argv.len;
+    const argv = try alloc.allocSentinel(?[*:0]const u8, argc, null);
+    defer alloc.free(argv);
+    var i: usize = 0;
+    while (i < argc) : (i += 1) argv[i] = std.os.argv[i];
+
+    return std.posix.execvpeZ(std.os.argv[0], argv.ptr, std.c.environ);
 }
 
 /// Serialize the current workspace tree to the layout file keyed by the current
@@ -774,9 +836,12 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
     setAccel(gtk_app, "win.toggle-follow-mouse", "<Ctrl><Shift>M");
 
-    // Reload: Ctrl+Shift+Q restarts into the latest build (pairs with Ctrl+Q
-    // quit). Run ./build.sh first; this only swaps the process, not the binary.
-    setAccel(gtk_app, "win.reload", "<Ctrl><Shift>q");
+    // Reload: Ctrl+Shift+Q. UPPERCASE Q — GTK delivers the uppercase keyval when
+    // Shift is held, so lowercase `q` here would silently never match (see the
+    // shift-combo convention above). Ghostty also binds ctrl+shift+q to `quit`,
+    // but our window accelerator wins over the terminal surface (same as the
+    // add-pane chords). Run ./build.sh first; reload only swaps the process.
+    setAccel(gtk_app, "win.reload", "<Ctrl><Shift>Q");
 
     // Quit: Ctrl+Q reuses the existing `win.close` action (clean shutdown +
     // layout save, both via onWindowCloseRequest).
@@ -1185,7 +1250,7 @@ fn onSwitchResponse(
     if (std.mem.orderZ(u8, "switch", response) == .eq) {
         rebuildWorkspace(a, req.path);
     } else if (std.mem.orderZ(u8, "newwin", response) == .eq) {
-        _ = openProjectNewWindow(a, req.path);
+        openProjectNewWindow(a, req.path);
     }
 }
 
@@ -1493,20 +1558,18 @@ const ChooserState = struct {
 /// `--gtk-single-instance=false` so it gets its own window instead of forwarding
 /// to us). No controlling terminal is attached, so nothing is left "stray".
 /// `ROOST_PROJECT` carries the target dir; the desktop-launch marker is dropped
-/// so the child resolves the project from that env, not recents. Returns true if
-/// the detached child was spawned (callers that quit afterward — e.g. `reload` —
-/// must NOT quit on false, or they'd leave the user with no window).
-fn openProjectNewWindow(a: *AppContext, path: []const u8) bool {
+/// so the child resolves the project from that env, not recents.
+fn openProjectNewWindow(a: *AppContext, path: []const u8) void {
     const alloc = a.alloc;
     const exe = std.fs.selfExePathAlloc(alloc) catch |err| {
         log.warn("cannot resolve own exe path err={}", .{err});
-        return false;
+        return;
     };
     defer alloc.free(exe);
 
-    var env = std.process.getEnvMap(alloc) catch return false;
+    var env = std.process.getEnvMap(alloc) catch return;
     defer env.deinit();
-    env.put("ROOST_PROJECT", path) catch return false;
+    env.put("ROOST_PROJECT", path) catch return;
     env.remove("GIO_LAUNCHED_DESKTOP_FILE_PID");
 
     // sh backgrounds a setsid'd child and exits immediately, so the new window
@@ -1522,10 +1585,9 @@ fn openProjectNewWindow(a: *AppContext, path: []const u8) bool {
     child.stderr_behavior = .Ignore;
     _ = child.spawnAndWait() catch |err| {
         log.warn("could not spawn new roost window err={}", .{err});
-        return false;
+        return;
     };
     log.info("opened new window for {s}", .{path});
-    return true;
 }
 
 /// Build + present the project/worktree chooser: a scrollable list of recent
@@ -1684,7 +1746,7 @@ fn onChooserResponse(
         if (st.list_box.getSelectedRow()) |row| {
             const idx = row.getIndex();
             if (idx >= 0 and @as(usize, @intCast(idx)) < st.paths.len) {
-                _ = openProjectNewWindow(a, st.paths[@intCast(idx)]);
+                openProjectNewWindow(a, st.paths[@intCast(idx)]);
             }
         }
     } else if (std.mem.orderZ(u8, "open", resp) == .eq) {
