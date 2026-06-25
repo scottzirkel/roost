@@ -56,9 +56,10 @@ A top **header bar / toolbar** on the window, plus user-defined **actions** that
   - **Run a command IN a new pane** (the non-capture path): `spawnPane` shows the recipe — `TerminalPane.initGhostty(.{ .command = .{ .shell = "<cmd>" }, .cwd = … })`; an action could add a pane via the existing `addRole`/`splitFocused` machinery with a custom command.
   - **Surface actions:** header-bar buttons via `installHeaderBar` (+ the bundled-icon pipeline for per-action icons), and/or a Ctrl+P-style palette.
 
-### Launcher / multi-window (operational — how 3d actually runs)
-- **Desktop launcher:** `scripts/roost.desktop` → installed at `~/.local/share/applications/roost.desktop`. Its `Exec` passes **`--gtk-single-instance=true`** — REQUIRED: the user's `~/.config/ghostty/config` sets `gtk-single-instance = false`, which Roost inherits, and without the flag every launch is its own window (forwarding never engages). Bare `cd <dir> && roost` (no flag) stays an independent window on purpose. The app id (`dev.scottzirkel.Roost`) is forced in code, so the Exec needs no `--class`.
-- **New windows** = detached child processes (`openProjectNewWindow`): one process per window, full isolation (the recents file is the only shared state).
+### Launcher / multi-window (operational)
+- **Isolation by default (committed `197032d`, user-verified 2026-06-25):** every roost window is its OWN process — a hang/crash in one can't take down the others. The desktop launcher (`scripts/roost.desktop`, installed at `~/.local/share/applications/roost.desktop`) **no longer passes `--gtk-single-instance`** (NOT a copy of the repo file — the installed one must be re-`cp`'d when the repo changes). No shared primary, no D-Bus forwarding. The app id (`dev.scottzirkel.Roost`) is forced in code (`injectArgs`), so the Exec needs no `--class`.
+- **Relaunch → chooser:** a **desktop** launch (sets `GIO_LAUNCHED_DESKTOP_FILE_PID`) while another roost is alive opens the project CHOOSER instead of auto-opening the last project (each window picks its own). Liveness = `ipc.liveSiblingExists()` pinging `roost-<pid>.sock` PIDs (ignores stale sockets). First launch with no live sibling → opens the last project directly. Terminal `cd && roost` (CLI) → opens cwd, never the chooser. Chooser focuses the top row (Enter opens it); a pick on a no-project window opens directly (no switch confirm).
+- **New windows from within roost** = detached child processes (`openProjectNewWindow`: `setsid` child, stdio /dev/null, `--gtk-single-instance=false`): one process per window, full isolation (the recents file is the only shared state).
 - Possible follow-up: make the chooser's "New Worktree…" open in a new window too (today it switches the current window, matching Ctrl+Shift+B).
 
 ### Deferred / known issues
@@ -80,7 +81,7 @@ New (reported 2026-06-24):
 
 Older deferred items:
 - **Agent-pane Ctrl+Z**: suspends `claude` (SIGTSTP), and `fg` can't resume it (no job-control shell). Options: intercept Ctrl+Z → modal (cancel/undo/exit), or run the agent under a job-control shell. Details in memory `roost-agent-ctrlz-suspend-todo`.
-- **Stale IPC sockets**: a crashed/SIGKILLed instance leaves its `${XDG_RUNTIME_DIR}/roost-<pid>.sock` behind — `ipc.zig` only unlinks the *same* PID's socket before bind, and PIDs differ per launch, so dead sockets accumulate. Harmless but untidy. Fix: on startup, sweep `roost-*.sock` whose `<pid>` has no live process (clean exit already unlinks via `Server.deinit`).
+- **Stale IPC sockets**: a crashed/SIGKILLed instance leaves its `${XDG_RUNTIME_DIR}/roost-<pid>.sock` behind — `ipc.zig` only unlinks the *same* PID's socket before bind, and PIDs differ per launch, so dead sockets accumulate. Harmless but untidy (saw ~10 dead vs 2 live during 2026-06-25 testing). `ipc.liveSiblingExists()` already pings PIDs so it's *correct* despite the clutter, but nothing auto-cleans. **Still TODO:** on startup, sweep `roost-*.sock` whose `<pid>` has no live process (the liveness probe in `liveSiblingExists` is the building block — extend it, or add a sweep beside it). (Clean exit already unlinks via `Server.deinit`.)
 - **Roost icon asset**: the desktop file references `Icon=dev.scottzirkel.Roost` but no icon is installed, so the launcher/notifications render a generic icon. Add a real asset under `hicolor/.../apps/dev.scottzirkel.Roost.png` (+ the notification ThemedIcon in `ipc.zig` already uses that name).
 
 ### 3a polish (optional, lower priority)
