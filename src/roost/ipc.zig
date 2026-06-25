@@ -35,6 +35,7 @@ const Application = @import("../apprt/gtk/class/application.zig").Application;
 const internal_os = @import("../os/main.zig");
 const layout = @import("layout.zig");
 const Workspace = layout.Workspace;
+const Config = @import("config.zig").Config;
 
 const log = std.log.scoped(.roost_ipc);
 
@@ -70,6 +71,8 @@ pub const Server = struct {
     app: *Application,
     /// The live workspace, for the Agent-pane status badge.
     workspace: *Workspace,
+    /// User settings, for the audio-notifications toggle.
+    config: *Config,
     /// Owned socket path (heap); unlinked + freed on `deinit`.
     path: [:0]u8,
     /// The listening service. Started on `init`; stopped/freed on `deinit`.
@@ -83,6 +86,7 @@ pub const Server = struct {
         alloc: std.mem.Allocator,
         app: *Application,
         workspace: *Workspace,
+        config: *Config,
     ) !void {
         const path = try socketPath(alloc);
         errdefer alloc.free(path);
@@ -119,6 +123,7 @@ pub const Server = struct {
             .alloc = alloc,
             .app = app,
             .workspace = workspace,
+            .config = config,
             .path = path,
             .service = service,
         };
@@ -209,11 +214,17 @@ pub const Server = struct {
         // Update the Agent-pane badge for every known event.
         self.workspace.setAgentStatus(event.status());
 
-        // Notify for the attention-worthy events only.
+        // Notify (+ optional sound) for the attention-worthy events only.
         switch (event) {
             .working => {},
-            .needs_input => self.notify("Agent needs you", if (rest.len > 0) rest else "Your agent is waiting for input."),
-            .done => self.notify("Agent finished", if (rest.len > 0) rest else "Your agent finished its task."),
+            .needs_input => {
+                self.notify("Agent needs you", if (rest.len > 0) rest else "Your agent is waiting for input.");
+                self.playSound("message");
+            },
+            .done => {
+                self.notify("Agent finished", if (rest.len > 0) rest else "Your agent finished its task.");
+                self.playSound("complete");
+            },
         }
     }
 
@@ -245,6 +256,25 @@ pub const Server = struct {
         // Stable id "roost-agent" so a newer notification REPLACES the old one
         // in the shell rather than stacking.
         gio_app.sendNotification("roost-agent", notification);
+    }
+
+    /// Play a freedesktop event sound (e.g. `complete`, `message`) when the
+    /// `audio-notifications` setting is on. No-op otherwise. Uses
+    /// `canberra-gtk-play -i <id>` via gio.Subprocess — fire-and-forget (GLib
+    /// reaps it on the main loop), and missing/failed spawns are swallowed so a
+    /// sound never disrupts the agent. gio Notifications are silent by design, so
+    /// this is the only audible cue.
+    fn playSound(self: *Server, event_id: [*:0]const u8) void {
+        if (!self.config.audio_notifications) return;
+        const argv = [_:null]?[*:0]const u8{ "canberra-gtk-play", "-i", event_id };
+        var gerr: ?*glib.Error = null;
+        const proc = gio.Subprocess.newv(@ptrCast(&argv), .flags_none, &gerr) orelse {
+            defer if (gerr) |e| e.free();
+            log.debug("could not play sound '{s}': {s}", .{ event_id, if (gerr) |e| (e.f_message orelse "(unknown)") else "(unknown)" });
+            return;
+        };
+        // We don't wait on it; drop our ref and let GLib reap it asynchronously.
+        proc.unref();
     }
 };
 

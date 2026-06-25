@@ -289,7 +289,7 @@ pub fn run() !void {
     var workspace: Workspace = undefined;
     var server: ipc.Server = undefined;
     var have_server = false;
-    if (server.init(alloc, gapp, &workspace)) {
+    if (server.init(alloc, gapp, &workspace, &cfg)) {
         have_server = true;
     } else |err| {
         log.warn("ipc socket unavailable (agent notifications disabled) err={}", .{err});
