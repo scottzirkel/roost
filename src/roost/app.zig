@@ -81,9 +81,18 @@ const app_id = "dev.scottzirkel.Roost";
 ///     fire, so without this, Ctrl+Shift+Q never reaches reload. Roost has its
 ///     own quit on Ctrl+Q, so removing Ghostty's is no loss — and this only
 ///     touches roost's argv, never the user's real Ghostty.
+///   - `--desktop-notifications=false`: suppress Ghostty's OSC 9 / OSC 777
+///     desktop notifications. The agent (`claude`) emits such an escape on a
+///     Stop/needs-input event AND our `roost-notify` Claude Code hook fires a
+///     richer `gio.Notification` (custom title/body + themed icon, plus the
+///     Agent-pane status badge) over `ROOST_SOCK`. Without this, an event pops
+///     TWO native notifications; we keep Roost's and drop Ghostty's. The core
+///     Surface honors this flag and drops the OSC before it reaches the apprt
+///     (`Surface.zig` `desktop_notification` branch), so nothing renders.
 const injected_flags = [_][:0]const u8{
     "--class=" ++ app_id,
     "--keybind=ctrl+shift+q=unbind",
+    "--desktop-notifications=false",
 };
 
 /// Append any `injected_flags` not already present to `std.os.argv` (idempotent,
