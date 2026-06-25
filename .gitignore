@@ -10,5 +10,4 @@ src/roost/icons.gresource
 .DS_Store
 
 # Internal / local-only (not for the public repo)
-HANDOFF.md
 .claude/settings.local.json
