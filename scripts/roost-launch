@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# roost-launch: turn the `roost` CLI into a pure launcher.
+#
+# Running a GUI app straight from a shell ties it to the controlling terminal —
+# the app is the shell's child, so closing the terminal SIGHUPs it dead, and the
+# shell is blocked until the app quits. This wrapper instead:
+#
+#   1. starts Roost in its OWN session (setsid) so it outlives this terminal,
+#   2. inherits the current directory, so `cd project && roost` still selects
+#      that project exactly like before,
+#   3. closes the launching terminal (we're moving into Roost for the session).
+#
+# The desktop launcher (scripts/roost.desktop) points at the binary directly and
+# does NOT use this — there's no terminal to detach from or close there.
+#
+# Put this on your PATH as `roost` (e.g. ~/.local/bin/roost -> this file).
+set -euo pipefail
+
+# Resolve the real binary relative to this script, even via a symlink, so the
+# public repo isn't pinned to one absolute path.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+bin="$here/../vendor/ghostty/zig-out/bin/roost"
+
+log="${XDG_STATE_HOME:-$HOME/.local/state}/roost.log"
+mkdir -p "$(dirname "$log")"
+
+# Launch detached in a fresh session. setsid -f forks and returns immediately;
+# stdout/stderr go to a log file so detached output (std.log) isn't lost. If the
+# binary is missing/unrunnable, setsid fails here and `set -e` keeps the
+# terminal open with the error — so a broken launch never silently vanishes.
+setsid -f "$bin" "$@" </dev/null >>"$log" 2>&1
+
+# Close the launching terminal by hanging up the parent shell. Roost is in its
+# own session, so the HUP doesn't reach it. If we're not running under an
+# interactive shell (PPID gone, or piped), this is a harmless no-op.
+kill -HUP "$PPID" 2>/dev/null || true

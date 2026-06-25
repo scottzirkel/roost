@@ -1,3 +1,25 @@
+# Roost scripts
+
+## `roost-launch` — the CLI launcher
+
+Makes the `roost` CLI a pure launcher. It starts Roost in its own session
+(`setsid`) so it outlives the terminal, inherits the current directory (so
+`cd project && roost` still selects that project), and then closes the launching
+terminal — you're moving into Roost for the session.
+
+Install: put it on your `PATH` as `roost`:
+
+```sh
+ln -sfn /home/scott/projects/roost/scripts/roost-launch ~/.local/bin/roost
+```
+
+Detached output (and any startup errors) goes to
+`${XDG_STATE_HOME:-~/.local/state}/roost.log`. If the binary is missing the
+wrapper fails before closing the terminal, so a broken launch is never hidden.
+To launch **without** closing the terminal (e.g. while developing), run the
+binary directly: `vendor/ghostty/zig-out/bin/roost`. The desktop launcher
+(`roost.desktop`) points at the binary directly and does not use this wrapper.
+
 # Roost agent integration scripts
 
 These wire **Claude Code** into the Roost window so the Agent pane can raise a
