@@ -85,6 +85,14 @@ const app_id = "dev.scottzirkel.Roost";
 ///     fire, so without this, Ctrl+Shift+Q never reaches reload. Roost has its
 ///     own quit on Ctrl+Q, so removing Ghostty's is no loss — and this only
 ///     touches roost's argv, never the user's real Ghostty.
+///   - `--keybind=ctrl+,=unbind`: drop Ghostty's built-in `ctrl+, → open_config`
+///     so Ctrl+, opens Roost's own Settings dialog instead. Like ctrl+shift+q,
+///     the terminal surface consumes the chord before our window accelerator, so
+///     without this the keystroke opens Ghostty's config rather than Settings.
+///     The trigger MUST be the unicode `,` (not the physical-key name `comma`,
+///     which parses to a different trigger and would not match Ghostty's default
+///     `.unicode=','` binding). (The gear header-bar button is action-based and
+///     works regardless; this is only for the keyboard accelerator.)
 ///   - `--desktop-notifications=false`: suppress Ghostty's OSC 9 / OSC 777
 ///     desktop notifications. The agent (`claude`) emits such an escape on a
 ///     Stop/needs-input event AND our `roost-notify` Claude Code hook fires a
@@ -96,6 +104,7 @@ const app_id = "dev.scottzirkel.Roost";
 const injected_flags = [_][:0]const u8{
     "--class=" ++ app_id,
     "--keybind=ctrl+shift+q=unbind",
+    "--keybind=ctrl+,=unbind",
     "--desktop-notifications=false",
 };
 
@@ -204,6 +213,15 @@ pub fn run() !void {
     // so the very first frame uses the whole monitor where the WM allows it.
     window.as(gtk.Window).setDefaultSize(1600, 1000);
 
+    // Load Roost's user settings (agent, audio, scratchpad persistence). Lives
+    // in this frame for the whole run; the settings UI mutates it via `&cfg` and
+    // saves. Loaded BEFORE the agent command so `agent` can feed resolveAgentCmd.
+    var cfg = Config.load(alloc);
+    defer cfg.deinit();
+    // Apply the persisted focus-follows-mouse preference before any pane is
+    // built, so the initial state (and the stateful action below) match config.
+    tree.setFollowMouse(cfg.focus_follows_mouse);
+
     // 6. Build the role-typed 4-pane workspace. Git pane runs lazygit if it's
     //    on PATH, else the user's shell (so the demo shows no error cards).
     const git_cmd: ?[:0]const u8 = if (lazygitAvailable()) "lazygit" else null;
@@ -213,10 +231,11 @@ pub fn run() !void {
         log.info("git pane: lazygit not found, falling back to shell", .{});
     }
 
-    // Resolve the Agent pane command the same way: prefer $ROOST_AGENT, else
-    // `claude`; run it only if it's on PATH, otherwise fall back to the user's
-    // shell (null). This makes the Agent pane actually run the agent.
-    const agent_cmd: ?[:0]const u8 = resolveAgentCmd();
+    // Resolve the Agent pane command: prefer $ROOST_AGENT, else the configured
+    // `agent` (default `claude`); run it only if it's on PATH, otherwise fall
+    // back to the user's shell (null). Snapshotted into a process-lifetime copy
+    // so a later Settings edit to `cfg.agent` can't dangle the spawned panes.
+    const agent_cmd: ?[:0]const u8 = resolveAgentCmd(alloc, cfg.agent);
     if (agent_cmd) |c| {
         log.info("agent pane: running '{s}'", .{c});
     } else {
@@ -267,11 +286,6 @@ pub fn run() !void {
     //     server only dereferences `&workspace` when an event fires, which can
     //     only happen once we're in the run loop (after the assignment). The
     //     stack address of `workspace` is stable for the whole run.
-    // Load Roost's user settings (audio, scratchpad persistence). Lives in this
-    // frame for the whole run; the settings UI mutates it via `&cfg` and saves.
-    var cfg = Config.load(alloc);
-    defer cfg.deinit();
-
     var workspace: Workspace = undefined;
     var server: ipc.Server = undefined;
     var have_server = false;
@@ -409,15 +423,18 @@ fn commandOnPath(cmd: [:0]const u8) bool {
     return false;
 }
 
-/// Resolve the Agent pane command: `$ROOST_AGENT` if set, else `claude`. The
-/// resolved command is used ONLY if it is found on PATH; otherwise we return
-/// null so the Agent pane falls back to the user's shell. The returned slice is
-/// a static literal or an environment slice (process-lifetime), so it needs no
-/// freeing and is safe to store on AppContext.
-fn resolveAgentCmd() ?[:0]const u8 {
-    const cmd: [:0]const u8 = std.posix.getenv("ROOST_AGENT") orelse "claude";
+/// Resolve the Agent pane command: `$ROOST_AGENT` if set, else `configured`
+/// (the `agent` setting, default `claude`). The resolved command is used ONLY if
+/// it is found on PATH; otherwise we return null so the Agent pane falls back to
+/// the user's shell. Returns a process-lifetime copy (owned by `alloc`, never
+/// freed): `configured` is owned by the live Config and may be replaced when the
+/// user edits the agent in Settings, but the panes were spawned with this value,
+/// so we keep a stable snapshot.
+fn resolveAgentCmd(alloc: std.mem.Allocator, configured: [:0]const u8) ?[:0]const u8 {
+    const cmd: [:0]const u8 = std.posix.getenv("ROOST_AGENT") orelse configured;
     if (cmd.len == 0) return null;
-    return if (commandOnPath(cmd)) cmd else null;
+    if (!commandOnPath(cmd)) return null;
+    return alloc.dupeZ(u8, cmd) catch cmd;
 }
 
 /// Resolve the project to open on launch.
@@ -521,6 +538,13 @@ fn installHeaderBar(window: *gtk.ApplicationWindow) void {
     help.as(gtk.Widget).setTooltipText("Keyboard shortcuts (Ctrl+Shift+/)");
     help.as(gtk.Actionable).setActionName("win.show-help");
     bar.packEnd(help.as(gtk.Widget));
+
+    // Settings.
+    const settings = gtk.Button.new();
+    settings.setIconName("roost-settings-symbolic");
+    settings.as(gtk.Widget).setTooltipText("Settings (Ctrl+,)");
+    settings.as(gtk.Actionable).setActionName("win.show-settings");
+    bar.packEnd(settings.as(gtk.Widget));
 
     window.as(gtk.Window).setTitlebar(bar.as(gtk.Widget));
 }
@@ -808,6 +832,9 @@ fn setupShortcuts(
     // Keyboard cheat-sheet (Ctrl+Shift+/).
     addAction(map, "show-help", onShowHelp, app_ctx);
 
+    // Settings dialog (Ctrl+,).
+    addAction(map, "show-settings", onShowSettings, app_ctx);
+
     // Toggle focus-follows-mouse (Ctrl+Shift+M). STATEFUL boolean action so the
     // header-bar toggle button and the accelerator share one source of truth.
     {
@@ -861,6 +888,7 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.create-worktree", "<Ctrl><Shift>b");
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
+    setAccel(gtk_app, "win.show-settings", "<Ctrl>comma");
     setAccel(gtk_app, "win.toggle-follow-mouse", "<Ctrl><Shift>M");
 
     // Reload: Ctrl+Shift+Q. UPPERCASE Q — GTK delivers the uppercase keyval when
@@ -1552,10 +1580,130 @@ fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(
     presentShortcuts(a);
 }
 
-fn onToggleFollowMouse(action: *gio.SimpleAction, _: ?*glib.Variant, _: *AppContext) callconv(.c) void {
+/// Present the Settings dialog (Ctrl+, / gear button): an `adw.PreferencesDialog`
+/// with instant-apply rows for the Roost-level settings. Each row writes its
+/// value back into `app_ctx.config` and persists via `Config.save` the moment it
+/// changes — no Save/Cancel button (the libadwaita convention). Initial values
+/// are set BEFORE connecting the change signals so seeding the rows doesn't
+/// trigger a spurious save.
+fn presentSettings(a: *AppContext) void {
+    const dialog = adw.PreferencesDialog.new();
+    const page = adw.PreferencesPage.new();
+
+    // Panes group.
+    const panes_group = adw.PreferencesGroup.new();
+    panes_group.setTitle("Panes");
+
+    // Focus-follows-mouse. Shares state with Ctrl+Shift+M and the header-bar
+    // toggle button (via the `win.toggle-follow-mouse` stateful action).
+    const ffm = adw.SwitchRow.new();
+    ffm.as(adw.PreferencesRow).setTitle("Focus follows mouse");
+    ffm.as(adw.ActionRow).setSubtitle("Focus a pane when the pointer enters it");
+    ffm.setActive(@intFromBool(tree.followMouseEnabled()));
+    _ = gobject.Object.signals.notify.connect(ffm, *AppContext, onFfmToggled, a, .{ .detail = "active" });
+    panes_group.add(ffm.as(gtk.Widget));
+
+    const group = adw.PreferencesGroup.new();
+    group.setTitle("Agent");
+
+    // Agent command. EntryRow emits `apply` on a deliberate edit (Enter / apply
+    // button). Takes effect for panes spawned afterward (reopen / new window /
+    // reload); $ROOST_AGENT still overrides it at launch.
+    const agent_row = adw.EntryRow.new();
+    agent_row.as(adw.PreferencesRow).setTitle("Command");
+    // Show the apply (✓) affordance so Enter / the button emits `apply` (without
+    // this, Enter emits `entry-activated` instead and the value never saves).
+    agent_row.setShowApplyButton(1);
+    var abuf: [256]u8 = undefined;
+    const agent_z = std.fmt.bufPrintZ(&abuf, "{s}", .{a.config.agent}) catch "claude";
+    agent_row.as(gtk.Editable).setText(agent_z);
+    _ = adw.EntryRow.signals.apply.connect(agent_row, *AppContext, onAgentApplied, a, .{});
+    group.add(agent_row.as(gtk.Widget));
+
+    // Audio notifications toggle.
+    const audio = adw.SwitchRow.new();
+    audio.as(adw.PreferencesRow).setTitle("Audio notifications");
+    audio.as(adw.ActionRow).setSubtitle("Play a sound on agent events");
+    audio.setActive(@intFromBool(a.config.audio_notifications));
+    _ = gobject.Object.signals.notify.connect(audio, *AppContext, onAudioToggled, a, .{ .detail = "active" });
+    group.add(audio.as(gtk.Widget));
+
+    const scratch_group = adw.PreferencesGroup.new();
+    scratch_group.setTitle("Scratchpad");
+
+    // Autosave toggle.
+    const autosave = adw.SwitchRow.new();
+    autosave.as(adw.PreferencesRow).setTitle("Autosave");
+    autosave.as(adw.ActionRow).setSubtitle("Save the scratchpad to a file as you type");
+    autosave.setActive(@intFromBool(a.config.scratchpad_autosave));
+    _ = gobject.Object.signals.notify.connect(autosave, *AppContext, onAutosaveToggled, a, .{ .detail = "active" });
+    scratch_group.add(autosave.as(gtk.Widget));
+
+    // Scratchpad file path. EntryRow emits `apply` when the user confirms (Enter
+    // or the apply button), so we persist only on a deliberate edit.
+    const path_row = adw.EntryRow.new();
+    path_row.as(adw.PreferencesRow).setTitle("File");
+    path_row.setShowApplyButton(1);
+    var pbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&pbuf, "{s}", .{a.config.scratchpad_path}) catch "";
+    path_row.as(gtk.Editable).setText(path_z);
+    _ = adw.EntryRow.signals.apply.connect(path_row, *AppContext, onScratchpadPathApplied, a, .{});
+    scratch_group.add(path_row.as(gtk.Widget));
+
+    page.add(panes_group);
+    page.add(group);
+    page.add(scratch_group);
+    dialog.add(page);
+    dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+}
+
+fn onShowSettings(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    presentSettings(a);
+}
+
+fn onAudioToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *AppContext) callconv(.c) void {
+    a.config.audio_notifications = row.getActive() != 0;
+    a.config.save();
+}
+
+fn onAutosaveToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *AppContext) callconv(.c) void {
+    a.config.scratchpad_autosave = row.getActive() != 0;
+    a.config.save();
+}
+
+fn onScratchpadPathApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void {
+    const text = row.as(gtk.Editable).getText();
+    a.config.setScratchpadPath(std.mem.span(text));
+    a.config.save();
+}
+
+fn onAgentApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void {
+    const text = row.as(gtk.Editable).getText();
+    a.config.setAgent(std.mem.span(text));
+    a.config.save();
+}
+
+fn onFfmToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *AppContext) callconv(.c) void {
+    const on = row.getActive() != 0;
+    tree.setFollowMouse(on);
+    a.config.focus_follows_mouse = on;
+    a.config.save();
+    // Keep the Ctrl+Shift+M accelerator + header-bar toggle button in sync by
+    // updating the shared stateful action's state (does not re-fire its handler).
+    if (a.window.as(gio.ActionMap).lookupAction("toggle-follow-mouse")) |act| {
+        if (gobject.ext.cast(gio.SimpleAction, act)) |sa| {
+            sa.setState(glib.Variant.newBoolean(@intFromBool(on)));
+        }
+    }
+}
+
+fn onToggleFollowMouse(action: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     const on = tree.toggleFollowMouse();
     // Reflect the new state so the header-bar toggle button updates with us.
     action.setState(glib.Variant.newBoolean(@intFromBool(on)));
+    // Persist so the preference sticks across launches (it now lives in config).
+    a.config.focus_follows_mouse = on;
+    a.config.save();
     log.info("focus-follows-mouse {s}", .{if (on) "on" else "off"});
 }
 

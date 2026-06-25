@@ -18,6 +18,12 @@ const log = std.log.scoped(.roost_config);
 pub const Config = struct {
     alloc: Allocator,
 
+    /// The agent program the Agent pane runs (default `claude`). `$ROOST_AGENT`
+    /// still overrides this at launch. Owned, NUL-terminated (resolved at load).
+    agent: [:0]const u8 = "claude",
+    /// Focus a pane when the pointer enters it (Hyprland-style). Default on;
+    /// the Ctrl+Shift+M toggle / header button / Settings switch all persist here.
+    focus_follows_mouse: bool = true,
     /// Play a sound on agent events (done / needs-input). Default off so a fresh
     /// install is quiet; pairs with the silent `gio.Notification` in `ipc.zig`.
     audio_notifications: bool = false,
@@ -34,6 +40,7 @@ pub const Config = struct {
     pub fn load(alloc: Allocator) Config {
         var cfg: Config = .{
             .alloc = alloc,
+            .agent = alloc.dupeZ(u8, "claude") catch "claude",
             .scratchpad_path = defaultScratchpadPath(alloc),
         };
 
@@ -46,15 +53,26 @@ pub const Config = struct {
         defer alloc.free(bytes);
 
         cfg.parse(bytes);
-        log.info("config: audio_notifications={} scratchpad_autosave={} scratchpad_path='{s}'", .{
-            cfg.audio_notifications, cfg.scratchpad_autosave, cfg.scratchpad_path,
+        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_path='{s}'", .{
+            cfg.agent, cfg.focus_follows_mouse, cfg.audio_notifications, cfg.scratchpad_autosave, cfg.scratchpad_path,
         });
         return cfg;
     }
 
     pub fn deinit(self: *Config) void {
+        self.alloc.free(self.agent);
         self.alloc.free(self.scratchpad_path);
         self.* = undefined;
+    }
+
+    /// Replace `agent` with an owned NUL-terminated copy of `new_agent`, freeing
+    /// the previous value. No-op on empty input or OOM. Used by the settings UI.
+    pub fn setAgent(self: *Config, new_agent: []const u8) void {
+        const trimmed = std.mem.trim(u8, new_agent, " \t");
+        if (trimmed.len == 0) return;
+        const dup = self.alloc.dupeZ(u8, trimmed) catch return;
+        self.alloc.free(self.agent);
+        self.agent = dup;
     }
 
     /// Replace `scratchpad_path` with an owned copy of `new_path` (resolving `~`
@@ -84,7 +102,11 @@ pub const Config = struct {
     }
 
     fn setKV(self: *Config, key: []const u8, val: []const u8) void {
-        if (std.mem.eql(u8, key, "audio-notifications")) {
+        if (std.mem.eql(u8, key, "agent")) {
+            self.setAgent(val);
+        } else if (std.mem.eql(u8, key, "focus-follows-mouse")) {
+            self.focus_follows_mouse = parseBool(val) orelse self.focus_follows_mouse;
+        } else if (std.mem.eql(u8, key, "audio-notifications")) {
             self.audio_notifications = parseBool(val) orelse self.audio_notifications;
         } else if (std.mem.eql(u8, key, "scratchpad-autosave")) {
             self.scratchpad_autosave = parseBool(val) orelse self.scratchpad_autosave;
@@ -115,6 +137,8 @@ pub const Config = struct {
         defer buf.deinit(self.alloc);
         const w = buf.writer(self.alloc);
         try w.writeAll("# Roost configuration (key = value). Edit here or via Settings.\n\n");
+        try w.print("agent = {s}\n", .{self.agent});
+        try w.print("focus-follows-mouse = {s}\n", .{boolStr(self.focus_follows_mouse)});
         try w.print("audio-notifications = {s}\n", .{boolStr(self.audio_notifications)});
         try w.print("scratchpad-autosave = {s}\n", .{boolStr(self.scratchpad_autosave)});
         try w.print("scratchpad-path = {s}\n", .{self.scratchpad_path});

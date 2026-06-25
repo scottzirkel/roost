@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- A gear/cog for Settings. Filled shapes only (the symbolic recolorer fills
+       every shape): 8 teeth as rotated rects, plus a ring whose center is cut
+       out with fill-rule="evenodd" so it reads as a hollow gear, not a disc. -->
+  <g fill="#2e3436">
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(45 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(90 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(135 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(180 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(225 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(270 8 8)"/>
+    <rect x="7.1" y="0.6" width="1.8" height="3.4" rx="0.4" transform="rotate(315 8 8)"/>
+    <path fill-rule="evenodd" d="M8 2.2 A5.8 5.8 0 1 0 8 13.8 A5.8 5.8 0 1 0 8 2.2 Z M8 5.4 A2.6 2.6 0 1 1 8 10.6 A2.6 2.6 0 1 1 8 5.4 Z"/>
+  </g>
+</svg>

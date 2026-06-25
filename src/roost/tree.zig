@@ -38,6 +38,10 @@ const log = std.log.scoped(.roost_tree);
 var follow_mouse: bool = true;
 
 /// Flip focus-follows-mouse and return the new state (for the toggle action).
+pub fn setFollowMouse(on: bool) void {
+    follow_mouse = on;
+}
+
 pub fn toggleFollowMouse() bool {
     follow_mouse = !follow_mouse;
     return follow_mouse;
