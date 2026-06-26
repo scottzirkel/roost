@@ -212,6 +212,12 @@ pub const Workspace = struct {
         self.t.setAgentStatus(status);
     }
 
+    /// Route wired-action output into the first pane of `role` (agent/shell →
+    /// terminal injection; scratchpad → append). Returns true if delivered.
+    pub fn routeToRole(self: *Workspace, role: tree.Role, bytes: []const u8) bool {
+        return self.t.routeToRole(role, bytes);
+    }
+
     /// Recompute the active-pane highlight from the window's live GTK focus.
     /// Driven by the window `notify::focus-widget` handler (mouse + keyboard +
     /// programmatic focus all route through it). No-op if no window is attached.

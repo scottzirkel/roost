@@ -666,6 +666,29 @@ pub const Tree = struct {
         self.focusNode(target);
     }
 
+    /// Route `bytes` into the first pane of `role` (the wired-actions output
+    /// router). For terminal roles (`.agent`/`.shell`) it injects the text into
+    /// the pane's terminal, preferring that exact role but falling back to ANY
+    /// terminal — so e.g. failed-test output lands in the Agent pane for `claude`
+    /// to act on. For `.scratchpad` it appends to the scratchpad buffer. Returns
+    /// true if a target received it. The caller frames `bytes` (context header,
+    /// trailing newline to submit, etc.); we send them verbatim. Does NOT steal
+    /// focus — actions complete asynchronously, so yanking focus would be jarring.
+    pub fn routeToRole(self: *Tree, role: Role, bytes: []const u8) bool {
+        if (bytes.len == 0) return false;
+        if (role == .scratchpad) {
+            const leaf = self.firstLeafOfRole(.scratchpad) orelse return false;
+            if (leaf.leaf.pane != .scratchpad) return false;
+            leaf.leaf.pane.scratchpad.appendText(bytes);
+            return true;
+        }
+        const target = self.firstTerminalLeafPreferringRole(role) orelse return false;
+        const z = self.alloc.dupeZ(u8, bytes) catch return false;
+        defer self.alloc.free(z);
+        target.leaf.pane.terminal.sendText(z);
+        return true;
+    }
+
     /// First terminal leaf whose role == `role` (tree order); if none, the first
     /// terminal leaf of ANY role; null if there are no terminal panes.
     fn firstTerminalLeafPreferringRole(self: *Tree, role: Role) ?*Node {

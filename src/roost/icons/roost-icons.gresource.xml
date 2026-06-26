@@ -16,5 +16,6 @@
     <file>scalable/actions/roost-mouse-symbolic.svg</file>
     <file>scalable/actions/roost-help-symbolic.svg</file>
     <file>scalable/actions/roost-settings-symbolic.svg</file>
+    <file>scalable/actions/roost-action-symbolic.svg</file>
   </gresource>
 </gresources>

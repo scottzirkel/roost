@@ -36,6 +36,8 @@ const project = @import("project.zig");
 const Project = project.Project;
 const ipc = @import("ipc.zig");
 const git = @import("git.zig");
+const proc = @import("proc.zig");
+const actions = @import("actions.zig");
 
 const log = std.log.scoped(.roost);
 
@@ -63,6 +65,12 @@ const AppContext = struct {
     scratch_font_provider: ?*gtk.CssProvider = null,
     /// The current project. Owns its path; replaced (old freed) on rebuild.
     current: Project,
+    /// Wired actions (global + per-repo, merged) for the current project. Owned;
+    /// reloaded on project switch (`reloadActions`). Empty until first load.
+    actions: []actions.Action = &.{},
+    /// The header-bar dropdown (menu button) listing the actions by label. Held
+    /// so a project switch can rebuild its menu. null until the bar is installed.
+    actions_menu: ?*gtk.MenuButton = null,
     /// One-shot bypass for the quit confirmation: `onWindowCloseRequest` vetoes
     /// the first close and asks; the confirm handler sets this and re-issues the
     /// close, which then proceeds. Also set when closing the last pane (the user
@@ -74,6 +82,13 @@ const AppContext = struct {
 /// GTK signal handlers / GActions are C callbacks and flipping a global is the
 /// simplest clean-shutdown signal for the loop.
 var running: bool = true;
+
+/// Cleared once the window is committed to closing (in `onWindowCloseRequest`).
+/// A wired action runs on a detached thread and posts its result back via a
+/// GLib idle source; if that source fires during the main-loop drain after we've
+/// begun teardown, `onActionDone` checks this and just frees its payload instead
+/// of touching the (now dying) workspace. Module-level for the C idle callback.
+var actions_alive: bool = true;
 
 /// Our dedicated GTK application id — the single source of truth for the
 /// in-process `--class` injection below. The desktop file's StartupWMClass and
@@ -331,6 +346,7 @@ pub fn run() !void {
         .current = project_dir orelse .{ .alloc = alloc, .path = "" },
     };
     defer if (app_ctx.current.path.len > 0) app_ctx.current.deinit();
+    defer actions.freeActions(app_ctx.alloc, app_ctx.actions);
 
     // 7. Wire close affordances so nothing is dead.
     //
@@ -392,7 +408,10 @@ pub fn run() !void {
     // window titlebar, so it persists across workspace rebuilds. Register our
     // bundled icons first so the bar's split buttons can resolve them.
     registerBundledIcons(window);
-    installHeaderBar(window);
+    // Load the wired actions for this project BEFORE the header bar, which builds
+    // the per-action buttons from them.
+    loadActions(&app_ctx);
+    installHeaderBar(&app_ctx);
 
     // 8. Present and focus the first leaf (the default 2x2 makes that the Agent
     //    pane; a restored layout focuses whatever leaf comes first in tree
@@ -517,12 +536,13 @@ fn registerBundledIcons(window: *gtk.ApplicationWindow) void {
     theme.addResourcePath("/dev/scottzirkel/roost/icons");
 }
 
-/// Build the window's header bar: split-right/down on the left, then Help + a
-/// Settings (cog) button on the right, each wired to its `win.*` action. Set as
-/// the window titlebar so it persists across workspace rebuilds (which only swap
-/// the child). Focus-follows-mouse lives in Settings now (and Ctrl+Shift+M), so
-/// it no longer needs its own header button.
-fn installHeaderBar(window: *gtk.ApplicationWindow) void {
+/// Build the window's header bar: split-right/down + the wired-action buttons on
+/// the left, then Help + a Settings (cog) button on the right, each wired to its
+/// `win.*` action. Set as the window titlebar so it persists across workspace
+/// rebuilds (which only swap the child). The action buttons live in a held box
+/// (`a.actions_box`) that `rebuildActionButtons` (re)fills from `a.actions`.
+fn installHeaderBar(a: *AppContext) void {
+    const window = a.window;
     const bar = gtk.HeaderBar.new();
     // Hide the CSD min/max/close controls: on a tiling WM the WM + Ctrl+Q manage
     // the window, and it keeps the bar minimal.
@@ -542,6 +562,16 @@ fn installHeaderBar(window: *gtk.ApplicationWindow) void {
     split_d.as(gtk.Widget).setTooltipText("Add pane down (Ctrl+Shift+D)");
     split_d.as(gtk.Actionable).setActionName("win.split-v");
     bar.packStart(split_d.as(gtk.Widget));
+
+    // Wired actions live in ONE dropdown (menu button) listing them by label, so
+    // the header isn't littered with identical buttons. Rebuilt on project switch.
+    const actions_btn = gtk.MenuButton.new();
+    actions_btn.setIconName("roost-action-symbolic");
+    actions_btn.setAlwaysShowArrow(1);
+    actions_btn.as(gtk.Widget).setTooltipText("Run action (Ctrl+Shift+P)");
+    a.actions_menu = actions_btn;
+    bar.packStart(actions_btn.as(gtk.Widget));
+    rebuildActionMenu(a);
 
     // Right side: Help then Settings (cog). packEnd stacks right-to-left, so to
     // read "Help, cog" left-to-right we pack the cog first (rightmost), then Help.
@@ -630,6 +660,9 @@ fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int
         );
         return @intFromBool(true); // veto: keep the window open behind the dialog
     }
+    // Committed to closing: stop any in-flight action's idle callback from
+    // touching the workspace as it tears down (it'll just free its payload).
+    actions_alive = false;
     saveLayout(app_ctx);
     running = false;
     return @intFromBool(false);
@@ -875,6 +908,19 @@ fn setupShortcuts(
     // Settings dialog (Ctrl+,).
     addAction(map, "show-settings", onShowSettings, app_ctx);
 
+    // Wired actions. `run-action` is PARAMETERIZED (int32 = index into
+    // `app_ctx.actions`) so one action serves every header button; it's button-
+    // driven (no accelerator). `show-actions` opens the palette (Ctrl+Shift+P).
+    {
+        const vt = glib.VariantType.new("i");
+        defer vt.free();
+        const ra = gio.SimpleAction.new("run-action", vt);
+        defer ra.unref();
+        _ = gio.SimpleAction.signals.activate.connect(ra, *AppContext, onRunAction, app_ctx, .{});
+        map.addAction(ra.as(gio.Action));
+    }
+    addAction(map, "show-actions", onShowActions, app_ctx);
+
     // Toggle focus-follows-mouse (Ctrl+Shift+M). STATEFUL boolean action so the
     // header-bar toggle button and the accelerator share one source of truth.
     {
@@ -929,6 +975,7 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
     setAccel(gtk_app, "win.show-settings", "<Ctrl>comma");
+    setAccel(gtk_app, "win.show-actions", "<Ctrl><Shift>P");
     setAccel(gtk_app, "win.toggle-follow-mouse", "<Ctrl><Shift>M");
 
     // Reload: Ctrl+Shift+Q. UPPERCASE Q — GTK delivers the uppercase keyval when
@@ -1306,6 +1353,9 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
     project.recordRecent(alloc, new_project.path);
 
     setWindowTitle(alloc, app_ctx.window, new_project);
+    // Reload wired actions for the new project (its per-repo file changes) and
+    // rebuild the header buttons.
+    reloadActions(app_ctx);
     app_ctx.workspace.focusIndex(0);
     app_ctx.workspace.updateHighlight();
 }
@@ -1628,6 +1678,357 @@ fn presentShortcuts(a: *AppContext) void {
 
 fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     presentShortcuts(a);
+}
+
+// ===========================================================================
+// Wired actions: run a user-defined command async, route its output by exit
+// code into a pane (agent/shell/scratchpad) or a desktop notification.
+// ===========================================================================
+
+/// (Re)load the merged action list (global + per-repo) for the current project.
+/// Frees any previously-loaded list. Does NOT rebuild the header buttons (the
+/// header bar may not exist yet at first call); see `reloadActions`.
+fn loadActions(a: *AppContext) void {
+    actions.freeActions(a.alloc, a.actions);
+    const cfg_dir = internal_os.xdg.config(a.alloc, .{ .subdir = "roost" }) catch null;
+    defer if (cfg_dir) |d| a.alloc.free(d);
+    a.actions = actions.load(a.alloc, cfg_dir, a.current.path);
+    log.info("loaded {d} wired action(s)", .{a.actions.len});
+}
+
+/// Reload the action list AND rebuild the header dropdown. Used on project switch
+/// (the per-repo `.roost/actions.json` differs between projects).
+fn reloadActions(a: *AppContext) void {
+    loadActions(a);
+    rebuildActionMenu(a);
+}
+
+/// (Re)build the header dropdown's menu from `a.actions` — one item per action,
+/// labeled by its title, each activating `win.run-action(i)`. Hidden when there
+/// are no actions. No-op before the header bar exists.
+fn rebuildActionMenu(a: *AppContext) void {
+    const button = a.actions_menu orelse return;
+    if (a.actions.len == 0) {
+        button.setMenuModel(null);
+        button.as(gtk.Widget).setVisible(0);
+        return;
+    }
+    const menu = gio.Menu.new();
+    defer menu.unref(); // setMenuModel takes its own ref
+    for (a.actions, 0..) |action, i| {
+        const label_z = a.alloc.dupeZ(u8, action.label) catch continue;
+        defer a.alloc.free(label_z);
+        const item = gio.MenuItem.new(label_z, null);
+        defer item.unref();
+        // Explicit int32 target so it matches `win.run-action`'s "i" param type
+        // (a bare `win.run-action(2)` detailed name could parse a different type).
+        item.setActionAndTargetValue("win.run-action", glib.Variant.newInt32(@intCast(i)));
+        menu.appendItem(item);
+    }
+    button.setMenuModel(menu.as(gio.MenuModel));
+    button.as(gtk.Widget).setVisible(1);
+}
+
+/// `win.run-action(i)` handler: run `app_ctx.actions[i]`.
+fn onRunAction(_: *gio.SimpleAction, param: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    const v = param orelse return;
+    const idx_i = v.getInt32();
+    if (idx_i < 0) return;
+    const idx: usize = @intCast(idx_i);
+    if (idx >= a.actions.len) return;
+    runAction(a, a.actions[idx]);
+}
+
+/// A snapshot of one action + its captured result, owned by the libc allocator
+/// so it can cross the worker-thread → main-thread boundary independent of the
+/// `a.actions` list (which may be freed/reloaded while the command runs).
+const ActionRun = struct {
+    app_ctx: *AppContext,
+    label: []u8,
+    command: []u8,
+    cwd: ?[]u8,
+    route: actions.Route,
+    on_success: ?actions.Route,
+    on_failure: ?actions.Route,
+    send: actions.Send,
+    // Filled by the worker:
+    code: u8 = 0,
+    output: []u8 = &.{},
+    failed_to_run: bool = false,
+};
+
+/// Kick off `action`: snapshot it into a libc-allocated `ActionRun` and run the
+/// command on a DETACHED thread (a blocking `proc.run` on the GTK main loop would
+/// freeze the whole UI for the duration of e.g. a test suite — the #1 gotcha).
+fn runAction(a: *AppContext, action: actions.Action) void {
+    const ca = std.heap.c_allocator;
+    const ar = ca.create(ActionRun) catch {
+        log.warn("action '{s}': out of memory", .{action.label});
+        return;
+    };
+    const label = ca.dupe(u8, action.label) catch {
+        ca.destroy(ar);
+        return;
+    };
+    const command = ca.dupe(u8, action.command) catch {
+        ca.free(label);
+        ca.destroy(ar);
+        return;
+    };
+    // cwd: explicit override, else the project root, else inherit (null).
+    const cwd_src: ?[]const u8 = action.cwd orelse (if (a.current.path.len > 0) a.current.path else null);
+    const cwd: ?[]u8 = if (cwd_src) |c| (ca.dupe(u8, c) catch null) else null;
+
+    ar.* = .{
+        .app_ctx = a,
+        .label = label,
+        .command = command,
+        .cwd = cwd,
+        .route = action.route,
+        .on_success = action.on_success,
+        .on_failure = action.on_failure,
+        .send = action.send,
+    };
+
+    const thread = std.Thread.spawn(.{}, actionWorker, .{ar}) catch |err| {
+        log.warn("action '{s}': could not spawn worker err={}", .{ action.label, err });
+        freeActionRun(ar);
+        return;
+    };
+    thread.detach();
+    log.info("action '{s}' started: {s}", .{ action.label, action.command });
+}
+
+/// Worker thread: run the command to completion (blocking is fine here — we're
+/// off the main loop), capture the chosen stream(s), then marshal back to the
+/// main thread via a GLib idle source. Everything stays in the libc allocator.
+fn actionWorker(ar: *ActionRun) void {
+    const ca = std.heap.c_allocator;
+    const argv = [_][]const u8{ "/bin/sh", "-c", ar.command };
+    const out = proc.run(ca, &argv, ar.cwd) catch |err| {
+        log.warn("action '{s}': run failed err={}", .{ ar.label, err });
+        ar.failed_to_run = true;
+        ar.code = 127;
+        _ = glib.idleAdd(onActionDone, ar);
+        return;
+    };
+    defer out.deinit(ca);
+    ar.code = out.code;
+    ar.output = switch (ar.send) {
+        .stdout => ca.dupe(u8, out.stdout) catch &.{},
+        .stderr => ca.dupe(u8, out.stderr) catch &.{},
+        .all => std.mem.concat(ca, u8, &.{ out.stdout, out.stderr }) catch &.{},
+    };
+    // Thread-safe: g_idle_add attaches to the global default main context, which
+    // our run loop pumps; the callback runs on the main thread.
+    _ = glib.idleAdd(onActionDone, ar);
+}
+
+/// The effective route for a finished run (exit 0 → success route, else failure).
+fn routeForRun(ar: *ActionRun) actions.Route {
+    return if (ar.code == 0)
+        (ar.on_success orelse ar.route)
+    else
+        (ar.on_failure orelse ar.route);
+}
+
+/// Main-thread idle callback: route the captured output, then free the payload.
+/// One-shot (`G_SOURCE_REMOVE`). Skips routing if the window is tearing down.
+fn onActionDone(data: ?*anyopaque) callconv(.c) c_int {
+    const ar: *ActionRun = @ptrCast(@alignCast(data orelse return 0));
+    defer freeActionRun(ar);
+    if (!actions_alive) return 0;
+
+    switch (routeForRun(ar)) {
+        .none => {},
+        .notify => {
+            const gapp = ar.app_ctx.window.as(gtk.Window).getApplication() orelse return 0;
+            const verdict: []const u8 = if (ar.failed_to_run) "error" else if (ar.code == 0) "passed" else "failed";
+            var tbuf: [192]u8 = undefined;
+            const title = std.fmt.bufPrintZ(&tbuf, "{s}: {s}", .{ ar.label, verdict }) catch "Action";
+            // Body intentionally omits the numeric exit code: "exit code 0" reads
+            // as failure to anyone who associates 0 with false. The title's
+            // passed/failed/error verdict already carries the result.
+            const body: []const u8 = if (ar.failed_to_run) "could not run command" else "";
+            ipc.notifyApp(gapp.as(gio.Application), "roost-action", title, body);
+        },
+        .agent, .shell, .scratchpad => |r| {
+            const role: tree.Role = switch (r) {
+                .agent => .agent,
+                .shell => .shell,
+                .scratchpad => .scratchpad,
+                else => unreachable,
+            };
+            const framed = frameActionOutput(ar.app_ctx.alloc, ar, role) orelse return 0;
+            defer ar.app_ctx.alloc.free(framed);
+            _ = ar.app_ctx.workspace.routeToRole(role, framed);
+        },
+    }
+    return 0;
+}
+
+/// Frame the captured output for a pane route (owned by `alloc`). The agent route
+/// gets a context header + a trailing newline so `claude` receives a submitted
+/// prompt; the scratchpad gets a markdown heading; the shell gets the raw output
+/// (no trailing newline, so the last line isn't auto-executed).
+fn frameActionOutput(alloc: std.mem.Allocator, ar: *ActionRun, role: tree.Role) ?[]u8 {
+    const verdict: []const u8 = if (ar.failed_to_run) "could not run" else if (ar.code == 0) "passed" else "failed";
+    return (switch (role) {
+        .agent => std.fmt.allocPrint(alloc, "[roost action \"{s}\" {s} (exit {d})]\n{s}\n", .{ ar.label, verdict, ar.code, ar.output }),
+        .scratchpad => std.fmt.allocPrint(alloc, "### {s} — {s} (exit {d})\n{s}", .{ ar.label, verdict, ar.code, ar.output }),
+        else => alloc.dupe(u8, ar.output),
+    }) catch null;
+}
+
+fn freeActionRun(ar: *ActionRun) void {
+    const ca = std.heap.c_allocator;
+    ca.free(ar.label);
+    ca.free(ar.command);
+    if (ar.cwd) |c| ca.free(c);
+    if (ar.output.len > 0) ca.free(ar.output);
+    ca.destroy(ar);
+}
+
+// --- Action palette (Ctrl+Shift+P) -----------------------------------------
+
+/// Heap state for the action palette, freed when its dialog closes. Holds the
+/// live search query so the filter func and the Enter-runs-first-match handler
+/// agree on what's visible.
+const Palette = struct {
+    a: *AppContext,
+    list: *gtk.ListBox,
+    dialog: *adw.AlertDialog,
+    query: [128]u8 = undefined,
+    query_len: usize = 0,
+};
+
+fn onShowActions(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    presentActionPalette(a);
+}
+
+/// Case-insensitive substring match; an empty query matches everything.
+fn paletteMatches(query: []const u8, label: []const u8) bool {
+    if (query.len == 0) return true;
+    return std.ascii.indexOfIgnoreCase(label, query) != null;
+}
+
+fn presentActionPalette(a: *AppContext) void {
+    if (a.actions.len == 0) {
+        const d = adw.AlertDialog.new("No actions configured", "Define actions in ~/.config/roost/actions.json or <project>/.roost/actions.json.");
+        d.addResponse("close", "Close");
+        d.setDefaultResponse("close");
+        d.setCloseResponse("close");
+        d.choose(a.window.as(gtk.Widget), null, null, null);
+        return;
+    }
+
+    const palette = a.alloc.create(Palette) catch return;
+
+    const list = gtk.ListBox.new();
+    list.setSelectionMode(.single);
+    palette.* = .{ .a = a, .list = list, .dialog = undefined };
+
+    for (a.actions) |action| {
+        const row_box = gtk.Box.new(.vertical, 0);
+
+        const name = gtk.Label.new(null);
+        var nbuf: [256]u8 = undefined;
+        name.setMarkup(std.fmt.bufPrintZ(&nbuf, "<b>{s}</b>", .{action.label}) catch "<b>action</b>");
+        name.setXalign(0.0);
+        name.as(gtk.Widget).setHalign(.start);
+        row_box.append(name.as(gtk.Widget));
+
+        const cmd = gtk.Label.new(null);
+        var cbuf: [512]u8 = undefined;
+        cmd.setMarkup(std.fmt.bufPrintZ(&cbuf, "<small><tt>{s}</tt></small>", .{action.command}) catch "");
+        cmd.setXalign(0.0);
+        cmd.as(gtk.Widget).setHalign(.start);
+        cmd.as(gtk.Widget).setOpacity(0.65);
+        row_box.append(cmd.as(gtk.Widget));
+
+        const row = gtk.ListBoxRow.new();
+        row.setChild(row_box.as(gtk.Widget));
+        const rw = row.as(gtk.Widget);
+        rw.setMarginTop(4);
+        rw.setMarginBottom(4);
+        rw.setMarginStart(8);
+        rw.setMarginEnd(8);
+        list.append(row.as(gtk.Widget));
+    }
+
+    list.setFilterFunc(paletteFilter, palette, null);
+    _ = gtk.ListBox.signals.row_activated.connect(list, *Palette, onPaletteRowActivated, palette, .{});
+
+    const search = gtk.SearchEntry.new();
+    search.as(gtk.Widget).setHexpand(1);
+    _ = gtk.SearchEntry.signals.search_changed.connect(search, *Palette, onPaletteSearchChanged, palette, .{});
+    _ = gtk.SearchEntry.signals.activate.connect(search, *Palette, onPaletteSearchActivate, palette, .{});
+
+    const scroller = gtk.ScrolledWindow.new();
+    scroller.setPolicy(.never, .automatic);
+    scroller.setMaxContentHeight(400);
+    scroller.setPropagateNaturalHeight(1);
+    scroller.setPropagateNaturalWidth(1);
+    scroller.setChild(list.as(gtk.Widget));
+
+    const vbox = gtk.Box.new(.vertical, 8);
+    // Give the palette a comfortable minimum width (the AlertDialog otherwise
+    // shrinks to the short action labels).
+    vbox.as(gtk.Widget).setSizeRequest(560, -1);
+    vbox.append(search.as(gtk.Widget));
+    vbox.append(scroller.as(gtk.Widget));
+
+    const dialog = adw.AlertDialog.new("Run Action", null);
+    palette.dialog = dialog;
+    dialog.setExtraChild(vbox.as(gtk.Widget));
+    dialog.addResponse("close", "Close");
+    dialog.setDefaultResponse("close");
+    dialog.setCloseResponse("close");
+    _ = adw.Dialog.signals.closed.connect(dialog.as(adw.Dialog), *Palette, onPaletteClosed, palette, .{});
+    dialog.choose(a.window.as(gtk.Widget), null, null, null);
+    _ = search.as(gtk.Widget).grabFocus();
+}
+
+fn paletteFilter(row: *gtk.ListBoxRow, data: ?*anyopaque) callconv(.c) c_int {
+    const palette: *Palette = @ptrCast(@alignCast(data orelse return 1));
+    const idx = row.getIndex();
+    if (idx < 0 or @as(usize, @intCast(idx)) >= palette.a.actions.len) return 1;
+    const label = palette.a.actions[@intCast(idx)].label;
+    return @intFromBool(paletteMatches(palette.query[0..palette.query_len], label));
+}
+
+fn onPaletteSearchChanged(search: *gtk.SearchEntry, palette: *Palette) callconv(.c) void {
+    const text = std.mem.span(search.as(gtk.Editable).getText());
+    const n = @min(text.len, palette.query.len);
+    @memcpy(palette.query[0..n], text[0..n]);
+    palette.query_len = n;
+    palette.list.invalidateFilter();
+}
+
+fn onPaletteSearchActivate(_: *gtk.SearchEntry, palette: *Palette) callconv(.c) void {
+    // Enter runs the first action matching the current query.
+    const a = palette.a;
+    const q = palette.query[0..palette.query_len];
+    for (a.actions) |action| {
+        if (paletteMatches(q, action.label)) {
+            _ = palette.dialog.as(adw.Dialog).close();
+            runAction(a, action);
+            return;
+        }
+    }
+}
+
+fn onPaletteRowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, palette: *Palette) callconv(.c) void {
+    const idx = row.getIndex();
+    if (idx < 0 or @as(usize, @intCast(idx)) >= palette.a.actions.len) return;
+    const a = palette.a;
+    const action = a.actions[@intCast(idx)];
+    _ = palette.dialog.as(adw.Dialog).close();
+    runAction(a, action);
+}
+
+fn onPaletteClosed(_: *adw.Dialog, palette: *Palette) callconv(.c) void {
+    palette.a.alloc.destroy(palette);
 }
 
 /// Present the Settings dialog (Ctrl+, / gear button): an `adw.PreferencesDialog`

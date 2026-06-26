@@ -231,31 +231,10 @@ pub const Server = struct {
     /// Raise a native desktop notification. Mirrors Ghostty's own
     /// `Application.desktopNotification` (application.zig): build a
     /// `gio.Notification`, set body + themed icon, send via the GApplication.
+    /// Delegates to the shared `notifyApp` (the wired-actions runner uses it too)
+    /// with the stable id "roost-agent" so a newer agent event REPLACES the old.
     fn notify(self: *Server, title: [:0]const u8, body: []const u8) void {
-        // `gio.Notification.setBody` wants a NUL-terminated string; `body` is a
-        // slice into our read buffer, so copy it NUL-terminated on the stack.
-        var body_buf: [1024]u8 = undefined;
-        const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{body}) catch body_buf[0..0 :0];
-
-        const notification = gio.Notification.new(title);
-        defer notification.unref();
-        notification.setBody(body_z);
-
-        // Show the AGENT's logo (claude) so the popup is recognizable, not the
-        // generic/Ghostty mark. `claude-desktop` is the icon the Claude Desktop
-        // package installs into the system hicolor theme, so mako resolves it by
-        // name (the same mechanism that makes Ghostty's own icon render). Append
-        // `dev.scottzirkel.Roost` as a fallback for when claude-desktop isn't
-        // installed (renders generic if neither resolves — no worse than before).
-        const icon = gio.ThemedIcon.new("claude-desktop");
-        defer icon.unref();
-        icon.appendName("dev.scottzirkel.Roost");
-        notification.setIcon(icon.as(gio.Icon));
-
-        const gio_app = self.app.as(gio.Application);
-        // Stable id "roost-agent" so a newer notification REPLACES the old one
-        // in the shell rather than stacking.
-        gio_app.sendNotification("roost-agent", notification);
+        notifyApp(self.app.as(gio.Application), "roost-agent", title, body);
     }
 
     /// Play a freedesktop event sound (e.g. `complete`, `message`) when the
@@ -277,6 +256,28 @@ pub const Server = struct {
         proc.unref();
     }
 };
+
+/// Build + send a desktop notification via `gio_app`. Shared by the IPC server
+/// (agent events, id "roost-agent") and the wired-actions runner (action
+/// results, id "roost-action"); a distinct `id` keeps action popups from
+/// replacing agent ones (and vice-versa). `body` may be any slice (copied
+/// NUL-terminated). The icon is the agent's `claude-desktop` with our app id as
+/// a fallback — same lookup that makes Ghostty's own icon render under mako.
+pub fn notifyApp(gio_app: *gio.Application, id: [*:0]const u8, title: [:0]const u8, body: []const u8) void {
+    var body_buf: [1024]u8 = undefined;
+    const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{body}) catch body_buf[0..0 :0];
+
+    const notification = gio.Notification.new(title);
+    defer notification.unref();
+    notification.setBody(body_z);
+
+    const icon = gio.ThemedIcon.new("claude-desktop");
+    defer icon.unref();
+    icon.appendName("dev.scottzirkel.Roost");
+    notification.setIcon(icon.as(gio.Icon));
+
+    gio_app.sendNotification(id, notification);
+}
 
 /// Build the socket path: `${XDG_RUNTIME_DIR}/roost-<pid>.sock`, falling back
 /// to `/tmp` when XDG_RUNTIME_DIR is unset. Caller owns the returned slice.

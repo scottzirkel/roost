@@ -145,6 +145,30 @@ pub const ScratchpadPane = struct {
         self.* = undefined;
     }
 
+    /// Append `bytes` to the end of the buffer (the wired-actions "→ scratchpad"
+    /// route). A separator newline goes first when the buffer is non-empty so
+    /// routed output starts on its own line. Inserting emits `changed`, so live
+    /// styling + debounced autosave run automatically (no manual call needed).
+    pub fn appendText(self: *ScratchpadPane, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        const buffer = self.text_view.getBuffer();
+
+        var end: gtk.TextIter = undefined;
+        buffer.getEndIter(&end);
+        if (buffer.getCharCount() > 0) {
+            buffer.insert(&end, "\n", 1);
+            buffer.getEndIter(&end); // the prior insert invalidated `end`
+        }
+
+        const z = self.alloc.dupeZ(u8, bytes) catch return;
+        defer self.alloc.free(z);
+        buffer.insert(&end, z.ptr, @intCast(bytes.len));
+
+        // Keep the freshly-appended text in view.
+        buffer.getEndIter(&end);
+        _ = self.text_view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+    }
+
     // --- live styling -----------------------------------------------------
 
     /// Re-derive and re-apply all markdown styling over the whole buffer. Cheap

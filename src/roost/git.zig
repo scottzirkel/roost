@@ -8,52 +8,21 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const proc = @import("proc.zig");
+
 const log = std.log.scoped(.roost_git);
 
-/// Captured result of a finished child process. `stdout`/`stderr` are owned by
-/// the caller's allocator.
-const Output = struct {
-    /// Process exit code; non-`Exited` termination (signal/stopped) maps to 1.
-    code: u8,
-    stdout: []u8,
-    stderr: []u8,
-};
-
-/// Run `argv` to completion, capturing stdout+stderr (both owned by `alloc`).
-/// Returns an error only if the process could not be spawned or its pipes
-/// could not be read.
-fn run(alloc: Allocator, argv: []const []const u8) !Output {
-    var child = std.process.Child.init(argv, alloc);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    var stdout: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stdout.deinit(alloc);
-    var stderr: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stderr.deinit(alloc);
-
-    try child.spawn();
-    // collectOutput must precede wait(): it drains the pipes the child writes.
-    try child.collectOutput(alloc, &stdout, &stderr, 1024 * 1024);
-    const term = try child.wait();
-
-    const code: u8 = switch (term) {
-        .Exited => |c| c,
-        else => 1,
-    };
-    return .{
-        .code = code,
-        .stdout = try stdout.toOwnedSlice(alloc),
-        .stderr = try stderr.toOwnedSlice(alloc),
-    };
-}
+// The subprocess runner now lives in `proc.zig` (shared with the wired-actions
+// runner). `proc.run(alloc, argv, cwd)` returns the same `{code,stdout,stderr}`
+// Output this file used before; git commands pass `null` cwd (they target a dir
+// via `-C <dir>` already).
 
 /// Resolve the git repository root containing `dir`:
 /// `git -C <dir> rev-parse --show-toplevel`. Returns the trimmed absolute path
 /// (owned by `alloc`), or null if `dir` is not in a git work tree or git is
 /// unavailable.
 pub fn repoRoot(alloc: Allocator, dir: []const u8) ?[]u8 {
-    const out = run(alloc, &.{ "git", "-C", dir, "rev-parse", "--show-toplevel" }) catch |err| {
+    const out = proc.run(alloc, &.{ "git", "-C", dir, "rev-parse", "--show-toplevel" }, null) catch |err| {
         log.warn("git rev-parse failed to run err={}", .{err});
         return null;
     };
@@ -73,7 +42,7 @@ pub fn repoRoot(alloc: Allocator, dir: []const u8) ?[]u8 {
 /// (`rev-parse --short HEAD`). Returns the trimmed name (owned by `alloc`), or
 /// null if `dir` is not in a git work tree or git is unavailable.
 pub fn currentBranch(alloc: Allocator, dir: []const u8) ?[]u8 {
-    const out = run(alloc, &.{ "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD" }) catch |err| {
+    const out = proc.run(alloc, &.{ "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD" }, null) catch |err| {
         log.warn("git rev-parse --abbrev-ref failed to run err={}", .{err});
         return null;
     };
@@ -92,7 +61,7 @@ pub fn currentBranch(alloc: Allocator, dir: []const u8) ?[]u8 {
 /// `git -C <dir> rev-parse --short HEAD` → owned short SHA, or null on error /
 /// empty repo (no commits yet).
 fn shortHead(alloc: Allocator, dir: []const u8) ?[]u8 {
-    const out = run(alloc, &.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }) catch return null;
+    const out = proc.run(alloc, &.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }, null) catch return null;
     defer alloc.free(out.stdout);
     defer alloc.free(out.stderr);
     if (out.code != 0) return null;
@@ -112,9 +81,9 @@ pub fn addWorktree(
     dest: []const u8,
     branch: []const u8,
 ) ?[]u8 {
-    const out = run(alloc, &.{
+    const out = proc.run(alloc, &.{
         "git", "-C", repo_root, "worktree", "add", dest, "-b", branch,
-    }) catch |err| {
+    }, null) catch |err| {
         return std.fmt.allocPrint(alloc, "could not run git: {s}", .{@errorName(err)}) catch null;
     };
     defer alloc.free(out.stdout);
@@ -137,9 +106,9 @@ pub fn addWorktree(
 /// sentinel-terminated paths (each + the slice owned by `alloc`), or null on
 /// error / not-a-repo.
 pub fn worktreeList(alloc: Allocator, repo_root: []const u8) ?[][:0]u8 {
-    const out = run(alloc, &.{
+    const out = proc.run(alloc, &.{
         "git", "-C", repo_root, "worktree", "list", "--porcelain",
-    }) catch return null;
+    }, null) catch return null;
     defer alloc.free(out.stdout);
     defer alloc.free(out.stderr);
     if (out.code != 0) return null;

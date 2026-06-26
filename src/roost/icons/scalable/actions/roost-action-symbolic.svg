@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Filled shapes only: GTK's symbolic recolorer forces `fill` on every
+       shape. A "run/play" triangle — the default glyph for wired-action header
+       buttons (an action may override it with its own bundled icon). -->
+  <g fill="#2e3436">
+    <path d="M4 2.5 L4 13.5 L13.5 8 Z"/>
+  </g>
+</svg>
