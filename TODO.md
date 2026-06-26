@@ -44,6 +44,7 @@ The product core (Phases 0–3d) is complete & committed; the Roost rename is do
 **Config:**
 - **Cleanup design** — tidy up the Settings/config UI design.
 - **Toggle pane titles** — config + UI toggle to show/hide the per-pane role title (the header label added by `labeledBox` in `tree.zig`).
+- **Set/change default layout** — let the user define the DEFAULT pane layout a NEW project/worktree opens with (one that has no saved layout yet), instead of the hardcoded 2x2. Anchors: a new workspace with no saved file falls back to the built-in default (`Workspace.init(.., saved=null, ..)` → default tree in `tree.zig`/`layout.zig`); per-project layouts persist keyed by a path-hash at `<config>/roost/layouts/<hash>.json` (`project.zig`). Likely UX: a "save current layout as default" action and/or a Settings entry; store the default as layout JSON and feed it through the existing `serialize`/`parseSer`/`buildFromSer` path (so the default is just another saved layout the no-saved-file case loads).
 
 **Scratchpad:**
 - **More spacing/padding** — increase the scratchpad editor's internal spacing/padding.
