@@ -57,6 +57,10 @@ const AppContext = struct {
     /// User settings (audio, scratchpad persistence). Lives in the run frame;
     /// the settings UI mutates it in place and calls `Config.save`.
     config: *Config,
+    /// Display-wide CSS provider for the scratchpad's `.roost-scratchpad` font
+    /// (family/size from `config`). Held so a Settings edit can rebuild it live
+    /// (`loadScratchFontCss`) instead of only on relaunch. null until installed.
+    scratch_font_provider: ?*gtk.CssProvider = null,
     /// The current project. Owns its path; replaced (old freed) on rebuild.
     current: Project,
     /// One-shot bypass for the quit confirmation: `onWindowCloseRequest` vetoes
@@ -399,6 +403,7 @@ pub fn run() !void {
     //    tree.zig applyRatioOnAllocate).
     window.as(gtk.Window).present();
     installPaneCss(window);
+    installScratchFontCss(&app_ctx);
     workspace.focusIndex(0);
     workspace.updateHighlight();
 
@@ -575,6 +580,35 @@ fn installPaneCss(window: *gtk.ApplicationWindow) void {
         provider.as(gtk.StyleProvider),
         gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10,
     );
+}
+
+/// Install the display-wide CSS provider that fonts the scratchpad
+/// (`.roost-scratchpad`, family/size from config). The provider is kept on
+/// `app_ctx` so a Settings change can rebuild it live (`loadScratchFontCss`).
+fn installScratchFontCss(a: *AppContext) void {
+    const provider = gtk.CssProvider.new(); // kept for the process lifetime
+    a.scratch_font_provider = provider;
+    loadScratchFontCss(a);
+    gtk.StyleContext.addProviderForDisplay(
+        a.window.as(gtk.Widget).getDisplay(),
+        provider.as(gtk.StyleProvider),
+        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 11, // above the pane-frame CSS
+    );
+}
+
+/// (Re)load the scratchpad font CSS into the held provider from the current
+/// config. Updates every open scratchpad immediately. No-op before install.
+fn loadScratchFontCss(a: *AppContext) void {
+    const provider = a.scratch_font_provider orelse return;
+    const fam = a.config.scratchpad_font_family orelse "monospace";
+    var buf: [512]u8 = undefined;
+    const css: [:0]const u8 = if (a.config.scratchpad_font_size) |sz|
+        std.fmt.bufPrintZ(&buf, ".roost-scratchpad, .roost-scratchpad text {{ font-family: \"{s}\"; font-size: {d}pt; }}", .{ fam, sz }) catch return
+    else
+        std.fmt.bufPrintZ(&buf, ".roost-scratchpad, .roost-scratchpad text {{ font-family: \"{s}\"; }}", .{fam}) catch return;
+    const bytes = glib.Bytes.new(css.ptr, css.len);
+    defer bytes.unref();
+    provider.loadFromBytes(bytes);
 }
 
 /// Window `close-request` handler. Both Ctrl+Q (`win.close`) and the WM close
@@ -1666,6 +1700,29 @@ fn presentSettings(a: *AppContext) void {
     _ = adw.EntryRow.signals.apply.connect(path_row, *AppContext, onScratchpadPathApplied, a, .{});
     scratch_group.add(path_row.as(gtk.Widget));
 
+    // Editor font family (CSS name; empty = monospace) and size (pt; empty =
+    // default). Both apply live across open scratchpads via loadScratchFontCss.
+    const font_row = adw.EntryRow.new();
+    font_row.as(adw.PreferencesRow).setTitle("Font family (empty = monospace)");
+    font_row.setShowApplyButton(1);
+    var fbuf: [128]u8 = undefined;
+    const font_z = std.fmt.bufPrintZ(&fbuf, "{s}", .{a.config.scratchpad_font_family orelse ""}) catch "";
+    font_row.as(gtk.Editable).setText(font_z);
+    _ = adw.EntryRow.signals.apply.connect(font_row, *AppContext, onScratchFontFamilyApplied, a, .{});
+    scratch_group.add(font_row.as(gtk.Widget));
+
+    const size_row = adw.EntryRow.new();
+    size_row.as(adw.PreferencesRow).setTitle("Font size (pt, empty = default)");
+    size_row.setShowApplyButton(1);
+    var sbuf: [8]u8 = undefined;
+    const size_z: [:0]const u8 = if (a.config.scratchpad_font_size) |sz|
+        (std.fmt.bufPrintZ(&sbuf, "{d}", .{sz}) catch "")
+    else
+        "";
+    size_row.as(gtk.Editable).setText(size_z);
+    _ = adw.EntryRow.signals.apply.connect(size_row, *AppContext, onScratchFontSizeApplied, a, .{});
+    scratch_group.add(size_row.as(gtk.Widget));
+
     page.add(panes_group);
     page.add(group);
     page.add(scratch_group);
@@ -1691,6 +1748,20 @@ fn onScratchpadPathApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void
     const text = row.as(gtk.Editable).getText();
     a.config.setScratchpadPath(std.mem.span(text));
     a.config.save();
+}
+
+fn onScratchFontFamilyApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void {
+    const text = row.as(gtk.Editable).getText();
+    a.config.setScratchFontFamily(std.mem.span(text));
+    a.config.save();
+    loadScratchFontCss(a); // live-apply to open scratchpads
+}
+
+fn onScratchFontSizeApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void {
+    const text = row.as(gtk.Editable).getText();
+    a.config.setScratchFontSize(std.mem.span(text));
+    a.config.save();
+    loadScratchFontCss(a);
 }
 
 fn onAgentApplied(row: *adw.EntryRow, a: *AppContext) callconv(.c) void {

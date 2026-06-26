@@ -34,6 +34,11 @@ pub const Config = struct {
     /// per-project: `<project>/.roost/scratchpad.md` (see `scratchpadPathFor`).
     /// Set this to share one scratchpad across all projects instead.
     scratchpad_override: ?[]const u8 = null,
+    /// Scratchpad editor font family, applied as CSS (e.g. "JetBrains Mono").
+    /// null → the default `monospace`. Owned.
+    scratchpad_font_family: ?[]const u8 = null,
+    /// Scratchpad editor font size in points. null → inherit the GTK default.
+    scratchpad_font_size: ?u8 = null,
 
     /// Load the config, applying file overrides on top of the defaults. Never
     /// fails: a missing/unreadable file yields the defaults. The returned Config
@@ -53,8 +58,11 @@ pub const Config = struct {
         defer alloc.free(bytes);
 
         cfg.parse(bytes);
-        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_override='{s}'", .{
-            cfg.agent, cfg.focus_follows_mouse, cfg.audio_notifications, cfg.scratchpad_autosave, cfg.scratchpad_override orelse "(per-project)",
+        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_override='{s}' scratchpad_font='{s}' scratchpad_font_size={?d}", .{
+            cfg.agent,                                  cfg.focus_follows_mouse,
+            cfg.audio_notifications,                    cfg.scratchpad_autosave,
+            cfg.scratchpad_override orelse "(per-project)", cfg.scratchpad_font_family orelse "(monospace)",
+            cfg.scratchpad_font_size,
         });
         return cfg;
     }
@@ -62,6 +70,7 @@ pub const Config = struct {
     pub fn deinit(self: *Config) void {
         self.alloc.free(self.agent);
         if (self.scratchpad_override) |o| self.alloc.free(o);
+        if (self.scratchpad_font_family) |f| self.alloc.free(f);
         self.* = undefined;
     }
 
@@ -101,6 +110,32 @@ pub const Config = struct {
         self.scratchpad_override = resolved;
     }
 
+    /// Set (or clear) the scratchpad font family. Empty → null (default
+    /// monospace). Frees any previous value. Used by the settings UI.
+    pub fn setScratchFontFamily(self: *Config, new_family: []const u8) void {
+        const trimmed = std.mem.trim(u8, new_family, " \t");
+        if (trimmed.len == 0) {
+            if (self.scratchpad_font_family) |f| self.alloc.free(f);
+            self.scratchpad_font_family = null;
+            return;
+        }
+        const dup = self.alloc.dupe(u8, trimmed) catch return;
+        if (self.scratchpad_font_family) |f| self.alloc.free(f);
+        self.scratchpad_font_family = dup;
+    }
+
+    /// Set (or clear) the scratchpad font size (points). Empty or unparseable or
+    /// zero → null (inherit the GTK default). Used by the settings UI.
+    pub fn setScratchFontSize(self: *Config, new_size: []const u8) void {
+        const trimmed = std.mem.trim(u8, new_size, " \t");
+        if (trimmed.len == 0) {
+            self.scratchpad_font_size = null;
+            return;
+        }
+        const v = std.fmt.parseInt(u8, trimmed, 10) catch return;
+        self.scratchpad_font_size = if (v == 0) null else v;
+    }
+
     fn parse(self: *Config, bytes: []const u8) void {
         var lines = std.mem.splitScalar(u8, bytes, '\n');
         while (lines.next()) |raw| {
@@ -127,6 +162,10 @@ pub const Config = struct {
             self.scratchpad_autosave = parseBool(val) orelse self.scratchpad_autosave;
         } else if (std.mem.eql(u8, key, "scratchpad-path")) {
             self.setScratchpadPath(val);
+        } else if (std.mem.eql(u8, key, "scratchpad-font-family")) {
+            self.setScratchFontFamily(val);
+        } else if (std.mem.eql(u8, key, "scratchpad-font-size")) {
+            self.setScratchFontSize(val);
         } else {
             log.warn("unknown config key '{s}'", .{key});
         }
@@ -158,6 +197,14 @@ pub const Config = struct {
         try w.print("scratchpad-autosave = {s}\n", .{boolStr(self.scratchpad_autosave)});
         // Empty = per-project default (<project>/.roost/scratchpad.md).
         try w.print("scratchpad-path = {s}\n", .{self.scratchpad_override orelse ""});
+        // Empty = default monospace.
+        try w.print("scratchpad-font-family = {s}\n", .{self.scratchpad_font_family orelse ""});
+        // Empty = inherit the GTK default size.
+        if (self.scratchpad_font_size) |sz| {
+            try w.print("scratchpad-font-size = {d}\n", .{sz});
+        } else {
+            try w.writeAll("scratchpad-font-size = \n");
+        }
 
         try std.fs.cwd().writeFile(.{ .sub_path = path, .data = buf.items });
         log.info("saved config ({d} bytes)", .{buf.items.len});

@@ -1,16 +1,29 @@
-//! ScratchpadPane: a "dumb", non-terminal pane backed by a plain editable
-//! GtkTextView inside a GtkScrolledWindow.
+//! ScratchpadPane: a non-terminal pane backed by an editable GtkTextView inside
+//! a GtkScrolledWindow, with **Typora-style live markdown styling**.
 //!
-//! It holds project notes and (when given a path) PERSISTS them: the contents
-//! are loaded on open and autosaved — debounced — as you type. The default file
-//! is per-project (`<project>/.roost/scratchpad.md`, resolved by the caller);
-//! the `.roost` dir gets a self-ignoring `.gitignore` so it never pollutes git.
+//! It holds project notes and (when given a path) PERSISTS them: contents are
+//! loaded on open and autosaved — debounced — as you type. The default file is
+//! per-project (`<project>/.roost/scratchpad.md`, resolved by the caller).
+//!
+//! Live styling: the SAME editable view is restyled on every edit and cursor
+//! move (`md.zig` parses the text into spans; we map each to a GtkTextTag).
+//! Markdown markers (`#`, `**`, backticks, `> `) are HIDDEN via an `invisible`
+//! tag on every line EXCEPT the one the cursor sits in, which reveals them
+//! (dimmed) so they stay editable — Typora's "source on the active block". We
+//! only ever apply/remove tags; the buffer text is never mutated, so autosave
+//! and `copyTextToSend` always see the raw markdown. Tag colors are derived from
+//! the live GTK theme foreground (`getColor`) so they follow the Omarchy theme;
+//! the base font comes from a `.roost-scratchpad` CSS class (see app.zig).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const gtk = @import("gtk");
 const glib = @import("glib");
+const gobject = @import("gobject");
+const gdk = @import("gdk");
+
+const md = @import("md.zig");
 
 const log = std.log.scoped(.roost_scratch);
 
@@ -18,33 +31,68 @@ const log = std.log.scoped(.roost_scratch);
 /// unsaved change.
 const autosave_debounce_ms = 1000;
 
+/// PANGO_STYLE_ITALIC. We can't `@import("pango")` (it isn't a wired build
+/// module — only adw/gdk/gio/glib/gobject/gtk/xlib are), so for the one enum
+/// property we need (`style`) we fetch its GType via Pango's C registration
+/// function and build the GValue by hand.
+const PANGO_STYLE_ITALIC: c_int = 2;
+extern fn pango_style_get_type() usize;
+
+/// Reusable GtkTextTags applied during `restyle`. Created once per buffer
+/// (anonymous; we apply them by pointer). The buffer owns them — they die with
+/// the text view. The color-bearing ones (`code`/`quote`/`marker_dim`) have
+/// their `*-rgba` refreshed each restyle so they track the live theme.
+const Tags = struct {
+    h1: *gtk.TextTag,
+    h2: *gtk.TextTag,
+    h3: *gtk.TextTag,
+    bold: *gtk.TextTag,
+    italic: *gtk.TextTag,
+    code: *gtk.TextTag,
+    quote: *gtk.TextTag,
+    /// invisible=true — hides markers off the cursor line.
+    hidden: *gtk.TextTag,
+    /// Dim foreground — revealed markers (on the cursor line) and list bullets.
+    marker_dim: *gtk.TextTag,
+};
+
 pub const ScratchpadPane = struct {
     alloc: Allocator,
     scrolled: *gtk.ScrolledWindow,
     text_view: *gtk.TextView,
+    tags: Tags,
     /// Owned persistence path; null disables load/save (e.g. no project).
     path: ?[]u8,
     autosave: bool,
     /// Pending debounced-save GLib source id (0 = none scheduled).
     save_source: c_uint = 0,
+    /// Cursor line last styled for; lets `mark-set` skip restyles that don't
+    /// change which line reveals its markers. -1 = not yet styled.
+    styled_line: c_int = -1,
 
     /// Build the pane. If `path` is non-null and the file exists, its contents
-    /// seed the buffer. Autosave is wired separately by `wire` (after the pane
-    /// reaches its final address), so loading here never triggers a save.
+    /// seed the buffer. Signals (autosave + live styling) are wired separately by
+    /// `wire` (after the pane reaches its final address), so loading here never
+    /// triggers a save or a stale-pointer callback.
     pub fn init(alloc: Allocator, path: ?[]const u8, autosave: bool) ScratchpadPane {
         const text_view = gtk.TextView.new();
         text_view.setEditable(1);
-        text_view.setMonospace(1);
         text_view.setWrapMode(.word_char);
         text_view.setLeftMargin(8);
         text_view.setRightMargin(8);
         text_view.setTopMargin(8);
         text_view.setBottomMargin(8);
+        // Base font comes from CSS (`.roost-scratchpad`, built from config in
+        // app.zig); the default there is monospace, so we drop setMonospace.
+        text_view.as(gtk.Widget).addCssClass("roost-scratchpad");
+
+        const buffer = text_view.getBuffer();
+        const tags = buildTags(buffer);
 
         const owned_path: ?[]u8 = if (path) |p| (alloc.dupe(u8, p) catch null) else null;
 
         // Load existing contents (if any) before anything is connected.
-        if (owned_path) |p| loadInto(alloc, text_view.getBuffer(), p);
+        if (owned_path) |p| loadInto(alloc, buffer, p);
 
         const scrolled = gtk.ScrolledWindow.new();
         scrolled.setPolicy(.automatic, .automatic);
@@ -56,24 +104,32 @@ pub const ScratchpadPane = struct {
             .alloc = alloc,
             .scrolled = scrolled,
             .text_view = text_view,
+            .tags = tags,
             .path = owned_path,
             .autosave = autosave,
         };
     }
 
-    /// Connect the autosave handler. MUST be called only once the pane sits at
-    /// its final address (it is moved into its Node), so the buffer's `changed`
-    /// user-data points at the stable ScratchpadPane. No-op without a path or
-    /// when autosave is off.
+    /// Connect signals. MUST be called only once the pane sits at its final
+    /// address (it is moved into its Node), so callback user-data points at the
+    /// stable ScratchpadPane. Wires live styling (always) + debounced autosave
+    /// (only with a path and autosave on), then does an initial styling pass.
     pub fn wire(self: *ScratchpadPane) void {
-        if (self.path == null or !self.autosave) return;
-        _ = gtk.TextBuffer.signals.changed.connect(
-            self.text_view.getBuffer(),
-            *ScratchpadPane,
-            onChanged,
-            self,
-            .{},
-        );
+        const buffer = self.text_view.getBuffer();
+        // Live styling: re-render on edits and on cursor movement.
+        _ = gtk.TextBuffer.signals.changed.connect(buffer, *ScratchpadPane, onChangedRestyle, self, .{});
+        _ = gtk.TextBuffer.signals.mark_set.connect(buffer, *ScratchpadPane, onMarkSet, self, .{});
+        // Re-style once realized: `getColor` only yields the real theme color
+        // after the widget is in a display, so the loaded text gets correct
+        // marker/code colors then.
+        _ = gtk.Widget.signals.realize.connect(self.text_view.as(gtk.Widget), *ScratchpadPane, onRealize, self, .{});
+        // Debounced autosave, only when persisting.
+        if (self.path != null and self.autosave) {
+            _ = gtk.TextBuffer.signals.changed.connect(buffer, *ScratchpadPane, onChanged, self, .{});
+        }
+        // Initial pass so the loaded content shows styled immediately (colors are
+        // refined on realize).
+        self.restyle();
     }
 
     /// Flush any pending change and release resources. Called from `Pane.destroy`
@@ -88,6 +144,89 @@ pub const ScratchpadPane = struct {
         if (self.path) |p| self.alloc.free(p);
         self.* = undefined;
     }
+
+    // --- live styling -----------------------------------------------------
+
+    /// Re-derive and re-apply all markdown styling over the whole buffer. Cheap
+    /// for a notes-sized document; runs on every edit and on cursor-line change.
+    /// Applying/removing tags does not emit `changed`/`mark-set`, so this never
+    /// re-enters.
+    fn restyle(self: *ScratchpadPane) void {
+        const buffer = self.text_view.getBuffer();
+
+        var start: gtk.TextIter = undefined;
+        var end: gtk.TextIter = undefined;
+        buffer.getBounds(&start, &end);
+        buffer.removeAllTags(&start, &end);
+
+        // include_hidden_chars=1 is REQUIRED: markers currently under the
+        // `invisible` tag are otherwise omitted, which would corrupt the parse.
+        const c_text = buffer.getText(&start, &end, 1);
+        defer glib.free(c_text);
+        const text = std.mem.span(c_text);
+
+        // The cursor's line reveals its markers; everything else hides them.
+        var cur: gtk.TextIter = undefined;
+        buffer.getIterAtMark(&cur, buffer.getInsert());
+        const cursor_line = cur.getLine();
+        self.styled_line = cursor_line;
+
+        // Refresh theme-derived colors so a light/dark switch is picked up.
+        var fg: gdk.RGBA = undefined;
+        self.text_view.as(gtk.Widget).getColor(&fg);
+        var dim = fg;
+        dim.f_alpha = 0.40;
+        var quote_fg = fg;
+        quote_fg.f_alpha = 0.65;
+        var code_bg = fg;
+        code_bg.f_alpha = 0.08;
+        setRgba(self.tags.marker_dim, "foreground-rgba", &dim);
+        setRgba(self.tags.quote, "foreground-rgba", &quote_fg);
+        setRgba(self.tags.code, "background-rgba", &code_bg);
+
+        const spans = md.parse(self.alloc, text) catch return;
+        defer self.alloc.free(spans);
+
+        for (spans) |sp| {
+            var a: gtk.TextIter = undefined;
+            var b: gtk.TextIter = undefined;
+            buffer.getIterAtOffset(&a, @intCast(sp.start));
+            buffer.getIterAtOffset(&b, @intCast(sp.end));
+            const tag: *gtk.TextTag = switch (sp.kind) {
+                .h1 => self.tags.h1,
+                .h2 => self.tags.h2,
+                .h3 => self.tags.h3,
+                .bold => self.tags.bold,
+                .italic => self.tags.italic,
+                .code => self.tags.code,
+                .quote => self.tags.quote,
+                // List bullets stay visible but dimmed (never hidden).
+                .list_marker => self.tags.marker_dim,
+                // Syntax markers: revealed (dim) on the cursor line, hidden off it.
+                .marker => if (a.getLine() == cursor_line) self.tags.marker_dim else self.tags.hidden,
+            };
+            buffer.applyTag(tag, &a, &b);
+        }
+    }
+
+    fn onChangedRestyle(_: *gtk.TextBuffer, self: *ScratchpadPane) callconv(.c) void {
+        self.restyle();
+    }
+
+    fn onMarkSet(_: *gtk.TextBuffer, _: *gtk.TextIter, mark: *gtk.TextMark, self: *ScratchpadPane) callconv(.c) void {
+        const buffer = self.text_view.getBuffer();
+        if (mark != buffer.getInsert()) return; // ignore selection-bound moves
+        var cur: gtk.TextIter = undefined;
+        buffer.getIterAtMark(&cur, mark);
+        if (cur.getLine() == self.styled_line) return; // same line: nothing reveals/hides
+        self.restyle();
+    }
+
+    fn onRealize(_: *gtk.Widget, self: *ScratchpadPane) callconv(.c) void {
+        self.restyle();
+    }
+
+    // --- autosave ---------------------------------------------------------
 
     fn onChanged(_: *gtk.TextBuffer, self: *ScratchpadPane) callconv(.c) void {
         // Debounce: schedule one save per burst; ignore changes while pending.
@@ -132,7 +271,8 @@ pub const ScratchpadPane = struct {
     /// `TerminalPane.sendText` ([:0]const u8). The caller OWNS it and must free
     /// it with `glib.free`. Returns null if there's nothing to send (empty
     /// selection collapses to the current-line path, so null only happens if the
-    /// current line is itself empty).
+    /// current line is itself empty). Always the RAW markdown — styling never
+    /// changes the underlying characters.
     pub fn copyTextToSend(self: *ScratchpadPane) ?[:0]u8 {
         const buffer = self.text_view.getBuffer();
 
@@ -165,6 +305,93 @@ pub const ScratchpadPane = struct {
         return spanOrNull(buffer.getText(&start, &end, 1));
     }
 };
+
+/// Create the reusable styling tags on `buffer`'s tag table. Anonymous (we apply
+/// by pointer). Color-bearing tags get their `*-rgba` set per restyle.
+fn buildTags(buffer: *gtk.TextBuffer) Tags {
+    const h1 = anonTag(buffer);
+    setF64(h1, "scale", 1.6);
+    setI32(h1, "weight", 700);
+    const h2 = anonTag(buffer);
+    setF64(h2, "scale", 1.4);
+    setI32(h2, "weight", 700);
+    const h3 = anonTag(buffer);
+    setF64(h3, "scale", 1.2);
+    setI32(h3, "weight", 700);
+
+    const bold = anonTag(buffer);
+    setI32(bold, "weight", 700);
+
+    const italic = anonTag(buffer);
+    setItalic(italic);
+
+    const code = anonTag(buffer);
+    setStr(code, "family", "monospace");
+
+    const quote = anonTag(buffer);
+    setI32(quote, "left-margin", 18);
+
+    const hidden = anonTag(buffer);
+    setBool(hidden, "invisible", true);
+
+    const marker_dim = anonTag(buffer);
+
+    return .{
+        .h1 = h1,
+        .h2 = h2,
+        .h3 = h3,
+        .bold = bold,
+        .italic = italic,
+        .code = code,
+        .quote = quote,
+        .hidden = hidden,
+        .marker_dim = marker_dim,
+    };
+}
+
+fn anonTag(buffer: *gtk.TextBuffer) *gtk.TextTag {
+    return buffer.createTag(null, null);
+}
+
+fn setBool(tag: *gtk.TextTag, name: [*:0]const u8, v: bool) void {
+    var val = gobject.ext.Value.newFrom(v);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty(name, &val);
+}
+
+fn setI32(tag: *gtk.TextTag, name: [*:0]const u8, v: c_int) void {
+    var val = gobject.ext.Value.newFrom(v);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty(name, &val);
+}
+
+fn setF64(tag: *gtk.TextTag, name: [*:0]const u8, v: f64) void {
+    var val = gobject.ext.Value.newFrom(v);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty(name, &val);
+}
+
+fn setStr(tag: *gtk.TextTag, name: [*:0]const u8, v: [*:0]const u8) void {
+    var val = gobject.ext.Value.newFrom(v);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty(name, &val);
+}
+
+fn setRgba(tag: *gtk.TextTag, name: [*:0]const u8, v: *gdk.RGBA) void {
+    var val = gobject.ext.Value.newFrom(v);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty(name, &val);
+}
+
+/// Set the `style` property to PANGO_STYLE_ITALIC via a hand-built GValue (the
+/// enum's GType comes from `pango_style_get_type` since pango isn't importable).
+fn setItalic(tag: *gtk.TextTag) void {
+    var val: gobject.Value = std.mem.zeroes(gobject.Value);
+    _ = val.init(pango_style_get_type());
+    val.setEnum(PANGO_STYLE_ITALIC);
+    defer val.unset();
+    tag.as(gobject.Object).setProperty("style", &val);
+}
 
 /// Read `path` into `buffer` if it exists. Missing file => leave the buffer
 /// empty. Best-effort: logs and returns on any other error.
