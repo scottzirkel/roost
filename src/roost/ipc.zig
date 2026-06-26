@@ -320,3 +320,53 @@ pub fn liveSiblingExists() bool {
     }
     return false;
 }
+
+/// Remove stale `roost-<pid>.sock` files whose PID has no live process. A
+/// crashed/SIGKILLed instance can't unlink its own socket (only a clean exit
+/// does, via `Server.deinit`), so dead sockets accumulate across launches. This
+/// sweeps them once at startup. Best-effort: every error is ignored — leftover
+/// clutter is harmless (`liveSiblingExists` already skips dead PIDs); this just
+/// keeps the runtime dir tidy. Live sockets, and other users' sockets we can't
+/// signal (EPERM), are left untouched. We collect the dead names first (an
+/// `entry.name` is only valid during the walk) and unlink after, never mutating
+/// the directory mid-iteration.
+pub fn sweepStaleSockets(alloc: std.mem.Allocator) void {
+    const self_pid = std.os.linux.getpid();
+    var dir = std.fs.openDirAbsolute(socketDir(), .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var dead: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (dead.items) |n| alloc.free(n);
+        dead.deinit(alloc);
+    }
+
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        const name = entry.name;
+        if (!std.mem.startsWith(u8, name, "roost-")) continue;
+        if (!std.mem.endsWith(u8, name, ".sock")) continue;
+        const pid_str = name["roost-".len .. name.len - ".sock".len];
+        const pid = std.fmt.parseInt(std.os.linux.pid_t, pid_str, 10) catch continue;
+        if (pid == self_pid) continue;
+
+        const alive = alive: {
+            posix.kill(pid, 0) catch |err| switch (err) {
+                error.PermissionDenied => break :alive true, // exists (other user)
+                else => break :alive false, // ESRCH → dead
+            };
+            break :alive true; // signal-able → alive
+        };
+        if (alive) continue;
+
+        const dup = alloc.dupe(u8, name) catch continue;
+        dead.append(alloc, dup) catch alloc.free(dup);
+    }
+
+    var removed: usize = 0;
+    for (dead.items) |name| {
+        dir.deleteFile(name) catch continue;
+        removed += 1;
+    }
+    if (removed > 0) log.info("swept {d} stale roost socket(s)", .{removed});
+}

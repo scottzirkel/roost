@@ -286,6 +286,11 @@ pub fn run() !void {
     //     server only dereferences `&workspace` when an event fires, which can
     //     only happen once we're in the run loop (after the assignment). The
     //     stack address of `workspace` is stable for the whole run.
+    // Tidy the runtime dir: drop any `roost-<pid>.sock` left behind by a
+    // crashed/SIGKILLed instance (only a clean exit unlinks its own). Harmless
+    // clutter otherwise, but it accumulates across launches.
+    ipc.sweepStaleSockets(alloc);
+
     var workspace: Workspace = undefined;
     var server: ipc.Server = undefined;
     var have_server = false;
