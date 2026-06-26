@@ -25,10 +25,6 @@ const log = std.log.scoped(.roost_actions);
 /// Where an action's output is routed. `none` discards it.
 pub const Route = enum { agent, shell, scratchpad, notify, none };
 
-/// Which stream(s) of the command to route. `notify` ignores this (it sends a
-/// short pass/fail summary, never the raw output).
-pub const Send = enum { all, stdout, stderr };
-
 /// One user-defined action. String fields are owned by the allocator passed to
 /// `load`/`parse`; free the whole list with `freeActions`.
 pub const Action = struct {
@@ -47,8 +43,6 @@ pub const Action = struct {
     on_success: ?Route = null,
     /// Route when the command exits non-zero (overrides `route`).
     on_failure: ?Route = null,
-    /// Which stream(s) to route (ignored by the `notify` route).
-    send: Send = .all,
 
     /// The route to use for a finished run with exit `code`.
     pub fn routeFor(self: Action, code: u8) Route {
@@ -205,7 +199,6 @@ test "parse: fields, defaults, and enum routes" {
     // Defaults on the bare entry.
     try std.testing.expectEqual(Route.notify, list[1].route);
     try std.testing.expectEqual(@as(?Route, null), list[1].on_success);
-    try std.testing.expectEqual(Send.all, list[1].send);
     // routeFor falls back to `route` for both.
     try std.testing.expectEqual(Route.notify, list[1].routeFor(0));
     try std.testing.expectEqual(Route.notify, list[1].routeFor(1));

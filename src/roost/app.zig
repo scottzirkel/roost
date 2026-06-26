@@ -36,7 +36,6 @@ const project = @import("project.zig");
 const Project = project.Project;
 const ipc = @import("ipc.zig");
 const git = @import("git.zig");
-const proc = @import("proc.zig");
 const actions = @import("actions.zig");
 
 const log = std.log.scoped(.roost);
@@ -71,6 +70,11 @@ const AppContext = struct {
     /// The header-bar dropdown (menu button) listing the actions by label. Held
     /// so a project switch can rebuild its menu. null until the bar is installed.
     actions_menu: ?*gtk.MenuButton = null,
+    /// Header activity button (spinner + running action name), shown only while
+    /// actions run; clicking it opens the live-output modal. null until installed.
+    activity_button: ?*gtk.Button = null,
+    activity_spinner: ?*gtk.Spinner = null,
+    activity_label: ?*gtk.Label = null,
     /// One-shot bypass for the quit confirmation: `onWindowCloseRequest` vetoes
     /// the first close and asks; the confirm handler sets this and re-issues the
     /// close, which then proceeds. Also set when closing the last pane (the user
@@ -84,11 +88,19 @@ const AppContext = struct {
 var running: bool = true;
 
 /// Cleared once the window is committed to closing (in `onWindowCloseRequest`).
-/// A wired action runs on a detached thread and posts its result back via a
-/// GLib idle source; if that source fires during the main-loop drain after we've
-/// begun teardown, `onActionDone` checks this and just frees its payload instead
-/// of touching the (now dying) workspace. Module-level for the C idle callback.
+/// A wired action runs on a detached thread and posts output/result back via
+/// GLib idle sources; if one fires during the main-loop drain after we've begun
+/// teardown, the idle callbacks check this and just free their payload instead
+/// of touching the (now dying) workspace. Module-level for the C idle callbacks.
 var actions_alive: bool = true;
+
+/// Live wired-action runs (started, not yet freed). Owned by the libc allocator,
+/// mutated ONLY on the main thread (worker threads just marshal chunks/results
+/// in). A run stays here until it's done AND no activity modal is showing it.
+var active_runs: std.ArrayListUnmanaged(*ActionRun) = .empty;
+
+/// Count of runs not yet finished — drives the header activity spinner.
+var running_count: usize = 0;
 
 /// Our dedicated GTK application id — the single source of truth for the
 /// in-process `--class` injection below. The desktop file's StartupWMClass and
@@ -572,6 +584,25 @@ fn installHeaderBar(a: *AppContext) void {
     a.actions_menu = actions_btn;
     bar.packStart(actions_btn.as(gtk.Widget));
     rebuildActionMenu(a);
+
+    // Activity indicator: a spinner + the running action's name, shown only while
+    // actions run; click opens the live-output modal. Hidden when nothing runs.
+    const activity = gtk.Button.new();
+    const abox = gtk.Box.new(.horizontal, 6);
+    const spinner = gtk.Spinner.new();
+    abox.append(spinner.as(gtk.Widget));
+    const alabel = gtk.Label.new(null);
+    alabel.setMaxWidthChars(28);
+    abox.append(alabel.as(gtk.Widget));
+    activity.setChild(abox.as(gtk.Widget));
+    activity.as(gtk.Widget).setTooltipText("Running actions — click to view live output");
+    activity.as(gtk.Widget).setVisible(0);
+    _ = gtk.Button.signals.clicked.connect(activity, *AppContext, onActivityClicked, a, .{});
+    a.activity_button = activity;
+    a.activity_spinner = spinner;
+    a.activity_label = alabel;
+    bar.packStart(activity.as(gtk.Widget));
+    updateActivityIndicator(a);
 
     // Right side: Help then Settings (cog). packEnd stacks right-to-left, so to
     // read "Help, cog" left-to-right we pack the cog first (rightmost), then Help.
@@ -1739,9 +1770,11 @@ fn onRunAction(_: *gio.SimpleAction, param: ?*glib.Variant, a: *AppContext) call
     runAction(a, a.actions[idx]);
 }
 
-/// A snapshot of one action + its captured result, owned by the libc allocator
-/// so it can cross the worker-thread → main-thread boundary independent of the
-/// `a.actions` list (which may be freed/reloaded while the command runs).
+/// One live wired-action run. Created on the main thread; the worker thread
+/// reads `command`/`cwd` (set once) and writes `code`/`failed_to_run` once at the
+/// end, but NEVER touches `output`/`view` — those are main-thread-only (the
+/// worker streams chunks in via idle callbacks). Libc-allocated so it outlives
+/// the `a.actions` list (which may reload while the command runs).
 const ActionRun = struct {
     app_ctx: *AppContext,
     label: []u8,
@@ -1750,16 +1783,29 @@ const ActionRun = struct {
     route: actions.Route,
     on_success: ?actions.Route,
     on_failure: ?actions.Route,
-    send: actions.Send,
-    // Filled by the worker:
+    // Live state (MAIN THREAD ONLY):
+    output: std.ArrayListUnmanaged(u8) = .empty,
+    done: bool = false,
+    /// The activity modal's text view showing this run live, or null.
+    view: ?*gtk.TextView = null,
+    /// Child pid (also its process-group leader; the worker spawns it in its own
+    /// group). 0 until spawned. Written by the worker (atomic), read by `stopRun`.
+    pid: i32 = 0,
+    /// True when the user hit Stop — the result reports "stopped" (not failed) and
+    /// skips routing the partial output to a pane.
+    stopped: bool = false,
+    // Set by the worker before its final marshal:
     code: u8 = 0,
-    output: []u8 = &.{},
     failed_to_run: bool = false,
 };
 
-/// Kick off `action`: snapshot it into a libc-allocated `ActionRun` and run the
-/// command on a DETACHED thread (a blocking `proc.run` on the GTK main loop would
-/// freeze the whole UI for the duration of e.g. a test suite — the #1 gotcha).
+/// A streamed output chunk marshaled from the worker to the main thread.
+const ChunkMsg = struct { run: *ActionRun, bytes: []u8 };
+
+/// Kick off `action`: snapshot it into a libc-allocated `ActionRun`, register it
+/// (for the activity indicator + modal), and run the command on a DETACHED
+/// thread. The worker streams output back so the UI never blocks (a `pub crawl`
+/// would freeze the whole GTK loop otherwise — the #1 gotcha).
 fn runAction(a: *AppContext, action: actions.Action) void {
     const ca = std.heap.c_allocator;
     const ar = ca.create(ActionRun) catch {
@@ -1787,41 +1833,148 @@ fn runAction(a: *AppContext, action: actions.Action) void {
         .route = action.route,
         .on_success = action.on_success,
         .on_failure = action.on_failure,
-        .send = action.send,
     };
+
+    active_runs.append(ca, ar) catch {};
+    running_count += 1;
+    updateActivityIndicator(a);
 
     const thread = std.Thread.spawn(.{}, actionWorker, .{ar}) catch |err| {
         log.warn("action '{s}': could not spawn worker err={}", .{ action.label, err });
-        freeActionRun(ar);
+        ar.failed_to_run = true;
+        ar.code = 127;
+        finalizeRun(ar); // route the failure + tidy the indicator
         return;
     };
     thread.detach();
     log.info("action '{s}' started: {s}", .{ action.label, action.command });
 }
 
-/// Worker thread: run the command to completion (blocking is fine here — we're
-/// off the main loop), capture the chosen stream(s), then marshal back to the
-/// main thread via a GLib idle source. Everything stays in the libc allocator.
+/// Worker thread: spawn `/bin/sh -c <command>` with piped stdout+stderr, stream
+/// the combined output back to the main thread chunk-by-chunk, then marshal the
+/// final exit code. Blocking reads are fine here — we're off the main loop.
 fn actionWorker(ar: *ActionRun) void {
     const ca = std.heap.c_allocator;
-    const argv = [_][]const u8{ "/bin/sh", "-c", ar.command };
-    const out = proc.run(ca, &argv, ar.cwd) catch |err| {
-        log.warn("action '{s}': run failed err={}", .{ ar.label, err });
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", ar.command }, ca);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.cwd = ar.cwd;
+    // Own process group (pgid = child pid) so Stop can signal the whole tree —
+    // the shell AND any commands it spawned — with one kill(-pid).
+    child.pgid = 0;
+    child.spawn() catch |err| {
+        log.warn("action '{s}': spawn failed err={}", .{ ar.label, err });
         ar.failed_to_run = true;
         ar.code = 127;
-        _ = glib.idleAdd(onActionDone, ar);
+        _ = glib.idleAdd(onActionFinished, ar);
         return;
     };
-    defer out.deinit(ca);
-    ar.code = out.code;
-    ar.output = switch (ar.send) {
-        .stdout => ca.dupe(u8, out.stdout) catch &.{},
-        .stderr => ca.dupe(u8, out.stderr) catch &.{},
-        .all => std.mem.concat(ca, u8, &.{ out.stdout, out.stderr }) catch &.{},
+    @atomicStore(i32, &ar.pid, child.id, .release);
+
+    streamChild(ca, ar, &child);
+
+    const term = child.wait() catch std.process.Child.Term{ .Exited = 1 };
+    ar.code = switch (term) {
+        .Exited => |c| c,
+        else => 1,
     };
-    // Thread-safe: g_idle_add attaches to the global default main context, which
-    // our run loop pumps; the callback runs on the main thread.
-    _ = glib.idleAdd(onActionDone, ar);
+    _ = glib.idleAdd(onActionFinished, ar);
+}
+
+/// Poll both pipes and marshal each read chunk to the main thread. Returns when
+/// both reach EOF (the child has closed them, i.e. is exiting).
+fn streamChild(ca: std.mem.Allocator, ar: *ActionRun, child: *std.process.Child) void {
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = child.stderr.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    var open: usize = 2;
+    var buf: [4096]u8 = undefined;
+    while (open > 0) {
+        _ = std.posix.poll(&fds, -1) catch break;
+        for (&fds) |*p| {
+            if (p.fd < 0) continue;
+            if (p.revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR) == 0) continue;
+            const n = std.posix.read(p.fd, &buf) catch 0;
+            if (n == 0) {
+                p.fd = -1;
+                open -= 1;
+                continue;
+            }
+            const chunk = ca.dupe(u8, buf[0..n]) catch continue;
+            const msg = ca.create(ChunkMsg) catch {
+                ca.free(chunk);
+                continue;
+            };
+            msg.* = .{ .run = ar, .bytes = chunk };
+            _ = glib.idleAdd(onActionChunk, msg);
+        }
+    }
+}
+
+/// Main-thread idle: append a streamed chunk to the run's buffer and (if a modal
+/// is showing it) to the live view. One-shot.
+fn onActionChunk(data: ?*anyopaque) callconv(.c) c_int {
+    const msg: *ChunkMsg = @ptrCast(@alignCast(data orelse return 0));
+    const ca = std.heap.c_allocator;
+    defer {
+        ca.free(msg.bytes);
+        ca.destroy(msg);
+    }
+    if (!actions_alive) return 0;
+    msg.run.output.appendSlice(ca, msg.bytes) catch {};
+    if (msg.run.view) |view| appendToTextView(view, msg.bytes);
+    return 0;
+}
+
+/// Append `bytes` at the end of a (read-only) text view and scroll to follow.
+fn appendToTextView(view: *gtk.TextView, bytes: []const u8) void {
+    const buffer = view.getBuffer();
+    var end: gtk.TextIter = undefined;
+    buffer.getEndIter(&end);
+    const z = std.heap.c_allocator.dupeZ(u8, bytes) catch return;
+    defer std.heap.c_allocator.free(z);
+    buffer.insert(&end, z.ptr, @intCast(bytes.len));
+    buffer.getEndIter(&end);
+    _ = view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+}
+
+/// Main-thread idle: the run finished. Mark done, route the result, refresh the
+/// indicator, and free the run unless a modal is still showing it. One-shot.
+fn onActionFinished(data: ?*anyopaque) callconv(.c) c_int {
+    const ar: *ActionRun = @ptrCast(@alignCast(data orelse return 0));
+    if (!actions_alive) {
+        removeActiveRun(ar);
+        freeActionRun(ar);
+        return 0;
+    }
+    finalizeRun(ar);
+    return 0;
+}
+
+/// Shared completion path (used by `onActionFinished` and the spawn-failure path
+/// in `runAction`): mark done, drop the running count, route, free if unviewed.
+fn finalizeRun(ar: *ActionRun) void {
+    ar.done = true;
+    if (running_count > 0) running_count -= 1;
+    updateActivityIndicator(ar.app_ctx);
+    routeFinished(ar);
+    // Keep the run alive while a modal is showing it (freed on modal close);
+    // otherwise it's now unreachable, so free it.
+    if (ar.view == null) {
+        removeActiveRun(ar);
+        freeActionRun(ar);
+    }
+}
+
+/// Stop a running action: signal its whole process group (SIGTERM) and mark it
+/// stopped so the result reports "stopped" and skips pane routing. Main-thread.
+fn stopRun(ar: *ActionRun) void {
+    if (ar.done) return;
+    ar.stopped = true;
+    const pid = @atomicLoad(i32, &ar.pid, .acquire);
+    // Negative pid = the process group (the child leads its own group).
+    if (pid > 0) std.posix.kill(-pid, std.posix.SIG.TERM) catch {};
 }
 
 /// The effective route for a finished run (exit 0 → success route, else failure).
@@ -1832,23 +1985,19 @@ fn routeForRun(ar: *ActionRun) actions.Route {
         (ar.on_failure orelse ar.route);
 }
 
-/// Main-thread idle callback: route the captured output, then free the payload.
-/// One-shot (`G_SOURCE_REMOVE`). Skips routing if the window is tearing down.
-fn onActionDone(data: ?*anyopaque) callconv(.c) c_int {
-    const ar: *ActionRun = @ptrCast(@alignCast(data orelse return 0));
-    defer freeActionRun(ar);
-    if (!actions_alive) return 0;
-
-    switch (routeForRun(ar)) {
+/// Route a finished run's output per its (exit-code-selected) route. A manually
+/// stopped run only notifies "stopped" — its partial output is NOT fed to a pane.
+fn routeFinished(ar: *ActionRun) void {
+    const route = if (ar.stopped) actions.Route.notify else routeForRun(ar);
+    switch (route) {
         .none => {},
         .notify => {
-            const gapp = ar.app_ctx.window.as(gtk.Window).getApplication() orelse return 0;
-            const verdict: []const u8 = if (ar.failed_to_run) "error" else if (ar.code == 0) "passed" else "failed";
+            const gapp = ar.app_ctx.window.as(gtk.Window).getApplication() orelse return;
+            const verdict: []const u8 = if (ar.stopped) "stopped" else if (ar.failed_to_run) "error" else if (ar.code == 0) "passed" else "failed";
             var tbuf: [192]u8 = undefined;
             const title = std.fmt.bufPrintZ(&tbuf, "{s}: {s}", .{ ar.label, verdict }) catch "Action";
-            // Body intentionally omits the numeric exit code: "exit code 0" reads
-            // as failure to anyone who associates 0 with false. The title's
-            // passed/failed/error verdict already carries the result.
+            // Body omits the numeric exit code: "exit code 0" reads as failure to
+            // anyone who associates 0 with false; the verdict word carries it.
             const body: []const u8 = if (ar.failed_to_run) "could not run command" else "";
             ipc.notifyApp(gapp.as(gio.Application), "roost-action", title, body);
         },
@@ -1859,12 +2008,11 @@ fn onActionDone(data: ?*anyopaque) callconv(.c) c_int {
                 .scratchpad => .scratchpad,
                 else => unreachable,
             };
-            const framed = frameActionOutput(ar.app_ctx.alloc, ar, role) orelse return 0;
+            const framed = frameActionOutput(ar.app_ctx.alloc, ar, role) orelse return;
             defer ar.app_ctx.alloc.free(framed);
             _ = ar.app_ctx.workspace.routeToRole(role, framed);
         },
     }
-    return 0;
 }
 
 /// Frame the captured output for a pane route (owned by `alloc`). The agent route
@@ -1873,11 +2021,22 @@ fn onActionDone(data: ?*anyopaque) callconv(.c) c_int {
 /// (no trailing newline, so the last line isn't auto-executed).
 fn frameActionOutput(alloc: std.mem.Allocator, ar: *ActionRun, role: tree.Role) ?[]u8 {
     const verdict: []const u8 = if (ar.failed_to_run) "could not run" else if (ar.code == 0) "passed" else "failed";
+    const out = ar.output.items;
     return (switch (role) {
-        .agent => std.fmt.allocPrint(alloc, "[roost action \"{s}\" {s} (exit {d})]\n{s}\n", .{ ar.label, verdict, ar.code, ar.output }),
-        .scratchpad => std.fmt.allocPrint(alloc, "### {s} — {s} (exit {d})\n{s}", .{ ar.label, verdict, ar.code, ar.output }),
-        else => alloc.dupe(u8, ar.output),
+        .agent => std.fmt.allocPrint(alloc, "[roost action \"{s}\" {s} (exit {d})]\n{s}\n", .{ ar.label, verdict, ar.code, out }),
+        .scratchpad => std.fmt.allocPrint(alloc, "### {s} — {s} (exit {d})\n{s}", .{ ar.label, verdict, ar.code, out }),
+        else => alloc.dupe(u8, out),
     }) catch null;
+}
+
+/// Remove `ar` from the active-runs registry (by identity). No-op if absent.
+fn removeActiveRun(ar: *ActionRun) void {
+    for (active_runs.items, 0..) |x, i| {
+        if (x == ar) {
+            _ = active_runs.swapRemove(i);
+            return;
+        }
+    }
 }
 
 fn freeActionRun(ar: *ActionRun) void {
@@ -1885,8 +2044,197 @@ fn freeActionRun(ar: *ActionRun) void {
     ca.free(ar.label);
     ca.free(ar.command);
     if (ar.cwd) |c| ca.free(c);
-    if (ar.output.len > 0) ca.free(ar.output);
+    ar.output.deinit(ca);
     ca.destroy(ar);
+}
+
+/// Show the spinner button while any action runs; hide + stop it otherwise.
+fn updateActivityIndicator(a: *AppContext) void {
+    const btn = a.activity_button orelse return;
+    const any_running = running_count > 0;
+    if (a.activity_spinner) |sp| {
+        if (any_running) sp.start() else sp.stop();
+    }
+    // Name the running action (or "N running" when several are in flight).
+    if (a.activity_label) |lbl| {
+        if (running_count == 1) {
+            const name: []const u8 = blk: {
+                for (active_runs.items) |ar| if (!ar.done) break :blk ar.label;
+                break :blk "running";
+            };
+            if (a.alloc.dupeZ(u8, name)) |z| {
+                defer a.alloc.free(z);
+                lbl.setText(z);
+            } else |_| {}
+        } else if (running_count > 1) {
+            var nb: [32]u8 = undefined;
+            lbl.setText(std.fmt.bufPrintZ(&nb, "{d} running", .{running_count}) catch "running");
+        }
+    }
+    btn.as(gtk.Widget).setVisible(@intFromBool(any_running));
+}
+
+// --- Activity modal (live output of running actions) -----------------------
+
+/// Heap state for the activity modal, freed when its dialog closes. Holds the
+/// runs it's showing so it can (a) read their output for copy/send and (b) clear
+/// their `view` back-pointer + free any finished runs when it closes.
+const Activity = struct {
+    a: *AppContext,
+    runs: std.ArrayListUnmanaged(*ActionRun),
+};
+
+fn onActivityClicked(_: *gtk.Button, a: *AppContext) callconv(.c) void {
+    presentActivityModal(a);
+}
+
+/// Open a wide modal showing each currently-active run's output live (read-only),
+/// with Copy + Send-to-pane buttons. Snapshots the runs active at open time.
+fn presentActivityModal(a: *AppContext) void {
+    if (active_runs.items.len == 0) {
+        const d = adw.AlertDialog.new("No actions running", "Nothing is running right now.");
+        d.addResponse("close", "Close");
+        d.setDefaultResponse("close");
+        d.setCloseResponse("close");
+        d.choose(a.window.as(gtk.Widget), null, null, null);
+        return;
+    }
+
+    const ca = std.heap.c_allocator;
+    const act = ca.create(Activity) catch return;
+    act.* = .{ .a = a, .runs = .empty };
+
+    const vbox = gtk.Box.new(.vertical, 8);
+    vbox.as(gtk.Widget).setSizeRequest(640, 460);
+
+    for (active_runs.items) |ar| {
+        act.runs.append(ca, ar) catch continue;
+
+        const lbl = gtk.Label.new(null);
+        var nb: [256]u8 = undefined;
+        lbl.setMarkup(std.fmt.bufPrintZ(&nb, "<b>{s}</b>", .{ar.label}) catch "<b>action</b>");
+        lbl.setXalign(0.0);
+        lbl.as(gtk.Widget).setHalign(.start);
+        vbox.append(lbl.as(gtk.Widget));
+
+        const view = gtk.TextView.new();
+        view.setEditable(0);
+        view.setCursorVisible(0);
+        view.setMonospace(1);
+        view.setWrapMode(.word_char);
+        const buffer = view.getBuffer();
+        if (ar.output.items.len > 0) {
+            if (a.alloc.dupeZ(u8, ar.output.items)) |z| {
+                defer a.alloc.free(z);
+                buffer.setText(z, @intCast(ar.output.items.len));
+            } else |_| {}
+        }
+        ar.view = view; // live-append target; cleared on modal close
+        var end: gtk.TextIter = undefined;
+        buffer.getEndIter(&end);
+        _ = view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+
+        const scroller = gtk.ScrolledWindow.new();
+        scroller.setPolicy(.automatic, .automatic);
+        scroller.as(gtk.Widget).setVexpand(1);
+        scroller.setChild(view.as(gtk.Widget));
+        vbox.append(scroller.as(gtk.Widget));
+    }
+
+    // Stop (destructive) + copy + send-to-pane row.
+    const row = gtk.Box.new(.horizontal, 6);
+    row.as(gtk.Widget).setMarginTop(4);
+    const stop = gtk.Button.newWithLabel("Stop");
+    stop.as(gtk.Widget).addCssClass("destructive-action");
+    _ = gtk.Button.signals.clicked.connect(stop, *Activity, onActivityStop, act, .{});
+    row.append(stop.as(gtk.Widget));
+    appendActivityButton(row, "Copy", onActivityCopy, act);
+    appendActivityButton(row, "Send to Agent", onActivitySendAgent, act);
+    appendActivityButton(row, "Send to Shell", onActivitySendShell, act);
+    appendActivityButton(row, "Send to Scratchpad", onActivitySendScratch, act);
+    vbox.append(row.as(gtk.Widget));
+
+    const dialog = adw.AlertDialog.new("Action Output", null);
+    dialog.setExtraChild(vbox.as(gtk.Widget));
+    dialog.addResponse("close", "Close");
+    dialog.setDefaultResponse("close");
+    dialog.setCloseResponse("close");
+    _ = adw.Dialog.signals.closed.connect(dialog.as(adw.Dialog), *Activity, onActivityClosed, act, .{});
+    dialog.choose(a.window.as(gtk.Widget), null, null, null);
+}
+
+fn appendActivityButton(
+    row: *gtk.Box,
+    label: [*:0]const u8,
+    cb: *const fn (*gtk.Button, *Activity) callconv(.c) void,
+    act: *Activity,
+) void {
+    const btn = gtk.Button.newWithLabel(label);
+    _ = gtk.Button.signals.clicked.connect(btn, *Activity, cb, act, .{});
+    row.append(btn.as(gtk.Widget));
+}
+
+/// Concatenate the shown runs' output (labeled when there's more than one).
+/// Owned by `alloc`.
+fn activityText(act: *Activity, alloc: std.mem.Allocator) ?[]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    const multi = act.runs.items.len > 1;
+    for (act.runs.items) |ar| {
+        if (multi) {
+            buf.appendSlice(alloc, "=== ") catch return null;
+            buf.appendSlice(alloc, ar.label) catch return null;
+            buf.appendSlice(alloc, " ===\n") catch return null;
+        }
+        buf.appendSlice(alloc, ar.output.items) catch return null;
+        if (multi) buf.appendSlice(alloc, "\n") catch return null;
+    }
+    return buf.toOwnedSlice(alloc) catch null;
+}
+
+fn onActivityCopy(btn: *gtk.Button, act: *Activity) callconv(.c) void {
+    const text = activityText(act, act.a.alloc) orelse return;
+    defer act.a.alloc.free(text);
+    const z = act.a.alloc.dupeZ(u8, text) catch return;
+    defer act.a.alloc.free(z);
+    btn.as(gtk.Widget).getClipboard().setText(z);
+}
+
+fn sendActivityTo(act: *Activity, role: tree.Role) void {
+    const text = activityText(act, act.a.alloc) orelse return;
+    defer act.a.alloc.free(text);
+    _ = act.a.workspace.routeToRole(role, text);
+}
+
+fn onActivitySendAgent(_: *gtk.Button, act: *Activity) callconv(.c) void {
+    sendActivityTo(act, .agent);
+}
+fn onActivitySendShell(_: *gtk.Button, act: *Activity) callconv(.c) void {
+    sendActivityTo(act, .shell);
+}
+fn onActivitySendScratch(_: *gtk.Button, act: *Activity) callconv(.c) void {
+    sendActivityTo(act, .scratchpad);
+}
+
+/// Stop every still-running action shown in this modal.
+fn onActivityStop(_: *gtk.Button, act: *Activity) callconv(.c) void {
+    for (act.runs.items) |ar| if (!ar.done) stopRun(ar);
+}
+
+/// Modal closed: detach from each run's live view (its widgets are about to be
+/// destroyed) and free any run that has already finished. Still-running runs
+/// keep going (output accrues in their buffer; reopening reseeds a fresh view).
+fn onActivityClosed(_: *adw.Dialog, act: *Activity) callconv(.c) void {
+    const ca = std.heap.c_allocator;
+    for (act.runs.items) |ar| {
+        ar.view = null;
+        if (ar.done) {
+            removeActiveRun(ar);
+            freeActionRun(ar);
+        }
+    }
+    act.runs.deinit(ca);
+    ca.destroy(act);
 }
 
 // --- Action palette (Ctrl+Shift+P) -----------------------------------------
