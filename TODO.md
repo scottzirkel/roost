@@ -1,4 +1,4 @@
-# Roost — TODO / Handoff (resume point: extracted + published to GitHub · 2026-06-23)
+# Roost — TODO / Handoff (resume point: fresh backlog all 5 DONE + live-verified, NOT yet committed · 2026-06-26)
 
 **Repo:** https://github.com/scottzirkel/roost (public, branch `main`). Now a supacode-style structure: this project root is the git repo; **Ghostty is a pinned vanilla submodule** at `vendor/ghostty` (`v1.3.1`); our additive source lives in the PARENT (`src/roost/`, `src/main_roost.zig`) + `patches/build.zig.patch` (the one additive build step). `./build.sh` symlinks our src into the submodule, applies the patch, and runs `zig build roost`. The old `roost` branch inside the submodule (commit `c59ce87`) is a local backstop — safe to delete now. This file (`TODO.md`, renamed from `HANDOFF.md`) is now tracked in the repo; `.claude/settings.local.json` stays gitignored (local-only).
 
@@ -40,15 +40,17 @@ Roost is a GTK4 "agent command center" for Omarchy/Hyprland — a focused clone 
 ## Remaining work
 The product core (Phases 0–3d) is complete & committed; the Roost rename is done. What's left is the deferred items + polish below, then the repo extraction.
 
-### ▶ Fresh backlog (2026-06-26 — user-requested, NOT started)
+### ▶ Fresh backlog (2026-06-26 — ALL 5 DONE this session, build+gate green, live-verified by screenshot; NOT yet committed)
+All five items below were implemented in one pass and verified on a live display (launched a dedicated instance on its own workspace, screenshotted, closed only that instance). Build clean, gate = only `build.zig`. **Still to do: commit** (one commit or split per-feature, user's call). Config round-trips the two new keys (`show-pane-titles`, plus the default-layout file is separate JSON).
+
 **Config:**
-- **Cleanup design** — tidy up the Settings/config UI design.
-- **Toggle pane titles** — config + UI toggle to show/hide the per-pane role title (the header label added by `labeledBox` in `tree.zig`).
-- **Set/change default layout** — let the user define the DEFAULT pane layout a NEW project/worktree opens with (one that has no saved layout yet), instead of the hardcoded 2x2. Anchors: a new workspace with no saved file falls back to the built-in default (`Workspace.init(.., saved=null, ..)` → default tree in `tree.zig`/`layout.zig`); per-project layouts persist keyed by a path-hash at `<config>/roost/layouts/<hash>.json` (`project.zig`). Likely UX: a "save current layout as default" action and/or a Settings entry; store the default as layout JSON and feed it through the existing `serialize`/`parseSer`/`buildFromSer` path (so the default is just another saved layout the no-saved-file case loads).
+- **Cleanup design** — *DONE.* Settings dialog tidied: title now "Settings" (was "Preferences"); **Agent** group gained a description ("Applies to panes opened afterward; $ROOST_AGENT overrides at launch"); **Scratchpad** group description carries the "empty = …" hints so the three EntryRow titles shrank to **File / Font family / Font size (pt)** (were long parenthetical titles). `presentSettings` in `app.zig`.
+- **Toggle pane titles** — *DONE.* New `show-pane-titles` config key (default on, `config.zig`) + a tree-global `show_pane_titles` (`setShowPaneTitles`/`paneTitlesShown` in `tree.zig`, applied at startup next to `setFollowMouse`). `labeledBox` honors it for new panes; `Tree.applyTitleVisibility` (+ `Workspace` wrapper) toggles every open pane's header label live. Settings **Panes** group switch "Show pane titles" → `onPaneTitlesToggled` (live-applies + persists). Hidden label keeps no height (terminal grid reclaims it).
+- **Set/change default layout** — *DONE.* A single user-wide default layout at `<config>/roost/default-layout.json` (same serialized format as per-project layouts). `project.zig` gained `readDefaultLayout`/`writeDefaultLayout`/`clearDefaultLayout`/`hasDefaultLayout`/`defaultLayoutPath`. Load order at startup + on project switch: per-project saved layout → **user default** → built-in 2x2 (both call sites updated). `doResetLayout` (Ctrl+Shift+0) now rebuilds the user default (was hardcoded 2x2); confirm text generalized. Settings **Default layout** group (`adw.ButtonRow`s): **"Save current layout as default"** (serializes current workspace → `writeDefaultLayout`, suggested-action) and **"Reset default to built-in 2×2"** (`clearDefaultLayout`); both toast back to the dialog (`a.settings_dialog` tracked, cleared on `adw.Dialog::closed`).
 
 **Scratchpad:**
-- **More spacing/padding** — increase the scratchpad editor's internal spacing/padding.
-- **Follow system theme colors (Catppuccin)** — pull scratchpad colors from the system/Omarchy theme (markdown tags already derive from the live theme foreground per the 2026-06-26 styling work; extend this).
+- **More spacing/padding** — *DONE.* `scratchpad_pane.zig` init: margins 8→18 (l/r) and 8→16 (t/b), plus `pixelsAboveLines/BelowLines=3`, `pixelsInsideWrap=2` for line breathing room.
+- **Follow system theme colors (Catppuccin)** — *DONE.* `restyle()` now resolves the theme **accent color** (`themeAccent` via `Widget.getStyleContext().lookupColor("accent_color"/"accent_bg_color"/"theme_selected_bg_color")`, graceful fallback to the plain foreground) and applies it to h1/h2/h3 foreground + the inline-code background tint. Confirmed live: headings render in the Omarchy/Catppuccin lavender accent vs. white body text. Dim/quote text still foreground-derived.
 
 ### ▶ Header bar + customizable wired actions (NEW — user-requested 2026-06-24, the big next feature)
 A top **header bar / toolbar** on the window, plus user-defined **actions** that run a command and route its output into a chosen pane. This is squarely the product thesis ([[roost-product-thesis]]: wiring tooling into the agent). Pieces:

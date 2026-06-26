@@ -24,6 +24,9 @@ pub const Config = struct {
     /// Focus a pane when the pointer enters it (Hyprland-style). Default on;
     /// the Ctrl+Shift+M toggle / header button / Settings switch all persist here.
     focus_follows_mouse: bool = true,
+    /// Show the per-pane role title (the small header label above each pane).
+    /// Default on; the Settings switch toggles it live across all panes.
+    show_pane_titles: bool = true,
     /// Play a sound on agent events (done / needs-input). Default off so a fresh
     /// install is quiet; pairs with the silent `gio.Notification` in `ipc.zig`.
     audio_notifications: bool = false,
@@ -58,11 +61,11 @@ pub const Config = struct {
         defer alloc.free(bytes);
 
         cfg.parse(bytes);
-        log.info("config: agent='{s}' focus_follows_mouse={} audio_notifications={} scratchpad_autosave={} scratchpad_override='{s}' scratchpad_font='{s}' scratchpad_font_size={?d}", .{
-            cfg.agent,                                  cfg.focus_follows_mouse,
-            cfg.audio_notifications,                    cfg.scratchpad_autosave,
-            cfg.scratchpad_override orelse "(per-project)", cfg.scratchpad_font_family orelse "(monospace)",
-            cfg.scratchpad_font_size,
+        log.info("config: agent='{s}' focus_follows_mouse={} show_pane_titles={} audio_notifications={} scratchpad_autosave={} scratchpad_override='{s}' scratchpad_font='{s}' scratchpad_font_size={?d}", .{
+            cfg.agent,                                      cfg.focus_follows_mouse,
+            cfg.show_pane_titles,                           cfg.audio_notifications,
+            cfg.scratchpad_autosave,                        cfg.scratchpad_override orelse "(per-project)",
+            cfg.scratchpad_font_family orelse "(monospace)", cfg.scratchpad_font_size,
         });
         return cfg;
     }
@@ -156,6 +159,8 @@ pub const Config = struct {
             self.setAgent(val);
         } else if (std.mem.eql(u8, key, "focus-follows-mouse")) {
             self.focus_follows_mouse = parseBool(val) orelse self.focus_follows_mouse;
+        } else if (std.mem.eql(u8, key, "show-pane-titles")) {
+            self.show_pane_titles = parseBool(val) orelse self.show_pane_titles;
         } else if (std.mem.eql(u8, key, "audio-notifications")) {
             self.audio_notifications = parseBool(val) orelse self.audio_notifications;
         } else if (std.mem.eql(u8, key, "scratchpad-autosave")) {
@@ -193,6 +198,7 @@ pub const Config = struct {
         try w.writeAll("# Roost configuration (key = value). Edit here or via Settings.\n\n");
         try w.print("agent = {s}\n", .{self.agent});
         try w.print("focus-follows-mouse = {s}\n", .{boolStr(self.focus_follows_mouse)});
+        try w.print("show-pane-titles = {s}\n", .{boolStr(self.show_pane_titles)});
         try w.print("audio-notifications = {s}\n", .{boolStr(self.audio_notifications)});
         try w.print("scratchpad-autosave = {s}\n", .{boolStr(self.scratchpad_autosave)});
         // Empty = per-project default (<project>/.roost/scratchpad.md).

@@ -80,6 +80,10 @@ const AppContext = struct {
     /// close, which then proceeds. Also set when closing the last pane (the user
     /// already acted on it), so Ctrl+W doesn't double-prompt.
     quit_confirmed: bool = false,
+    /// The currently-open Settings dialog (set in `presentSettings`, cleared on
+    /// its `closed` signal). Held so in-dialog row handlers can post a toast back
+    /// to it. null whenever Settings is closed.
+    settings_dialog: ?*adw.PreferencesDialog = null,
 };
 
 /// Whether our custom event loop should keep running. Module-level because the
@@ -249,9 +253,11 @@ pub fn run() !void {
     // saves. Loaded BEFORE the agent command so `agent` can feed resolveAgentCmd.
     var cfg = Config.load(alloc);
     defer cfg.deinit();
-    // Apply the persisted focus-follows-mouse preference before any pane is
-    // built, so the initial state (and the stateful action below) match config.
+    // Apply the persisted focus-follows-mouse + show-pane-titles preferences
+    // before any pane is built, so the initial state (and the stateful action
+    // below) match config.
     tree.setFollowMouse(cfg.focus_follows_mouse);
+    tree.setShowPaneTitles(cfg.show_pane_titles);
 
     // 6. Build the role-typed 4-pane workspace. Git pane runs lazygit if it's
     //    on PATH, else the user's shell (so the demo shows no error cards).
@@ -299,10 +305,12 @@ pub fn run() !void {
 
     // Load any saved layout. Parsed into an arena that must outlive
     // Workspace.init (which reads the SerNode tree); we free it right after.
-    // A missing/malformed file yields `null` -> the default 2x2.
+    // Order: this project's own saved layout → the user's default layout (if any)
+    // → null (the built-in 2x2). A missing/malformed file falls through.
     var layout_arena = std.heap.ArenaAllocator.init(alloc);
     const saved: ?*const tree.SerNode = blk: {
-        const bytes = project.readLayout(alloc, pane_cwd orelse "") orelse break :blk null;
+        const bytes = project.readLayout(alloc, pane_cwd orelse "") orelse
+            project.readDefaultLayout(alloc) orelse break :blk null;
         defer alloc.free(bytes);
         break :blk tree.parseSer(layout_arena.allocator(), bytes);
     };
@@ -1180,16 +1188,17 @@ fn doClosePane(a: *AppContext) void {
 }
 
 /// `win.reset-layout` (Ctrl+Shift+0): discard the current arrangement and
-/// rebuild the DEFAULT 2x2 in the current project dir. Useful after closing
-/// panes down to one (or otherwise wanting a clean slate). Mirrors the
-/// rebuildWorkspace swap, but with `saved=null` (-> default) and same project.
+/// rebuild the DEFAULT layout in the current project dir — the user's saved
+/// default if they have one, else the built-in 2x2. Useful after closing panes
+/// down to one (or otherwise wanting a clean slate). Mirrors the rebuildWorkspace
+/// swap, but loading the default layout instead of the project's own.
 fn onResetLayout(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     // Reset tears down EVERY pane, so confirm if any of them is a live agent.
     if (a.workspace.hasLiveAgent()) {
         confirmDestructive(
             a,
             "Reset the layout?",
-            "An agent is still running. Resetting to the default 2×2 ends every pane, including the agent.",
+            "An agent is still running. Resetting to your default layout ends every pane, including the agent.",
             "Reset layout",
             doResetLayout,
             false,
@@ -1200,11 +1209,19 @@ fn onResetLayout(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callco
 }
 
 fn doResetLayout(a: *AppContext) void {
-    log.info("reset-layout: rebuilding default 2x2", .{});
+    log.info("reset-layout: rebuilding the default layout", .{});
     const cwd: ?[:0]const u8 = if (a.current.path.len > 0) a.current.path else null;
+    // Use the user's saved default layout if set; else null → built-in 2x2.
+    var arena = std.heap.ArenaAllocator.init(a.alloc);
+    defer arena.deinit();
+    const saved: ?*const tree.SerNode = blk: {
+        const bytes = project.readDefaultLayout(a.alloc) orelse break :blk null;
+        defer a.alloc.free(bytes);
+        break :blk tree.parseSer(arena.allocator(), bytes);
+    };
     const scratch_path = a.config.scratchpadPathFor(a.alloc, cwd orelse "");
     defer if (scratch_path) |p| a.alloc.free(p);
-    var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, null, .{ // null => default 2x2
+    var new_ws = Workspace.init(a.alloc, a.git_cmd, a.agent_cmd, cwd, saved, .{
         .path = scratch_path,
         .autosave = a.config.scratchpad_autosave,
     });
@@ -1345,14 +1362,15 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
     // Per-worktree layout: first persist the OUTGOING workspace under the
     // current project's key (so returning here later restores this exact
     // arrangement), then build the replacement from the TARGET project's own
-    // saved layout — falling back to the default 2x2 if it has none/invalid.
-    // (app_ctx.workspace + app_ctx.current are still the OLD values here, which
-    // is exactly what saveLayout keys on.)
+    // saved layout — falling back to the user default layout, then the built-in
+    // 2x2, if it has none/invalid. (app_ctx.workspace + app_ctx.current are still
+    // the OLD values here, which is exactly what saveLayout keys on.)
     saveLayout(app_ctx);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const saved: ?*const tree.SerNode = blk: {
-        const bytes = project.readLayout(alloc, new_project.path) orelse break :blk null;
+        const bytes = project.readLayout(alloc, new_project.path) orelse
+            project.readDefaultLayout(alloc) orelse break :blk null;
         defer alloc.free(bytes);
         break :blk tree.parseSer(arena.allocator(), bytes);
     };
@@ -2387,6 +2405,7 @@ fn onPaletteClosed(_: *adw.Dialog, palette: *Palette) callconv(.c) void {
 /// trigger a spurious save.
 fn presentSettings(a: *AppContext) void {
     const dialog = adw.PreferencesDialog.new();
+    dialog.as(adw.Dialog).setTitle("Settings");
     const page = adw.PreferencesPage.new();
 
     // Panes group.
@@ -2402,8 +2421,17 @@ fn presentSettings(a: *AppContext) void {
     _ = gobject.Object.signals.notify.connect(ffm, *AppContext, onFfmToggled, a, .{ .detail = "active" });
     panes_group.add(ffm.as(gtk.Widget));
 
+    // Show-pane-titles toggle. Applies live across every open pane.
+    const titles = adw.SwitchRow.new();
+    titles.as(adw.PreferencesRow).setTitle("Show pane titles");
+    titles.as(adw.ActionRow).setSubtitle("Display the role label above each pane");
+    titles.setActive(@intFromBool(tree.paneTitlesShown()));
+    _ = gobject.Object.signals.notify.connect(titles, *AppContext, onPaneTitlesToggled, a, .{ .detail = "active" });
+    panes_group.add(titles.as(gtk.Widget));
+
     const group = adw.PreferencesGroup.new();
     group.setTitle("Agent");
+    group.setDescription("Applies to panes opened afterward; $ROOST_AGENT overrides at launch");
 
     // Agent command. EntryRow emits `apply` on a deliberate edit (Enter / apply
     // button). Takes effect for panes spawned afterward (reopen / new window /
@@ -2429,6 +2457,7 @@ fn presentSettings(a: *AppContext) void {
 
     const scratch_group = adw.PreferencesGroup.new();
     scratch_group.setTitle("Scratchpad");
+    scratch_group.setDescription("Empty file path = per-project .roost/scratchpad.md; empty font fields = monospace default");
 
     // Autosave toggle.
     const autosave = adw.SwitchRow.new();
@@ -2441,7 +2470,7 @@ fn presentSettings(a: *AppContext) void {
     // Scratchpad file path. EntryRow emits `apply` when the user confirms (Enter
     // or the apply button), so we persist only on a deliberate edit.
     const path_row = adw.EntryRow.new();
-    path_row.as(adw.PreferencesRow).setTitle("File (empty = per-project .roost/scratchpad.md)");
+    path_row.as(adw.PreferencesRow).setTitle("File");
     path_row.setShowApplyButton(1);
     var pbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const path_z = std.fmt.bufPrintZ(&pbuf, "{s}", .{a.config.scratchpad_override orelse ""}) catch "";
@@ -2452,7 +2481,7 @@ fn presentSettings(a: *AppContext) void {
     // Editor font family (CSS name; empty = monospace) and size (pt; empty =
     // default). Both apply live across open scratchpads via loadScratchFontCss.
     const font_row = adw.EntryRow.new();
-    font_row.as(adw.PreferencesRow).setTitle("Font family (empty = monospace)");
+    font_row.as(adw.PreferencesRow).setTitle("Font family");
     font_row.setShowApplyButton(1);
     var fbuf: [128]u8 = undefined;
     const font_z = std.fmt.bufPrintZ(&fbuf, "{s}", .{a.config.scratchpad_font_family orelse ""}) catch "";
@@ -2461,7 +2490,7 @@ fn presentSettings(a: *AppContext) void {
     scratch_group.add(font_row.as(gtk.Widget));
 
     const size_row = adw.EntryRow.new();
-    size_row.as(adw.PreferencesRow).setTitle("Font size (pt, empty = default)");
+    size_row.as(adw.PreferencesRow).setTitle("Font size (pt)");
     size_row.setShowApplyButton(1);
     var sbuf: [8]u8 = undefined;
     const size_z: [:0]const u8 = if (a.config.scratchpad_font_size) |sz|
@@ -2472,11 +2501,63 @@ fn presentSettings(a: *AppContext) void {
     _ = adw.EntryRow.signals.apply.connect(size_row, *AppContext, onScratchFontSizeApplied, a, .{});
     scratch_group.add(size_row.as(gtk.Widget));
 
+    // Default-layout group: capture the CURRENT arrangement as the default that
+    // new projects/worktrees (and "Reset layout", Ctrl+Shift+0) open with, or
+    // clear it back to the built-in 2x2. Buttons activate the shared GActions.
+    const layout_group = adw.PreferencesGroup.new();
+    layout_group.setTitle("Default layout");
+    layout_group.setDescription("The arrangement new projects open with (and that Reset layout restores)");
+
+    const save_default = adw.ButtonRow.new();
+    save_default.as(adw.PreferencesRow).setTitle("Save current layout as default");
+    save_default.setStartIconName("document-save-symbolic");
+    save_default.as(gtk.Widget).addCssClass("suggested-action");
+    _ = adw.ButtonRow.signals.activated.connect(save_default, *AppContext, onSaveDefaultLayoutRow, a, .{});
+    layout_group.add(save_default.as(gtk.Widget));
+
+    const clear_default = adw.ButtonRow.new();
+    clear_default.as(adw.PreferencesRow).setTitle("Reset default to built-in 2×2");
+    clear_default.setStartIconName("edit-undo-symbolic");
+    _ = adw.ButtonRow.signals.activated.connect(clear_default, *AppContext, onClearDefaultLayoutRow, a, .{});
+    layout_group.add(clear_default.as(gtk.Widget));
+
     page.add(panes_group);
     page.add(group);
     page.add(scratch_group);
+    page.add(layout_group);
     dialog.add(page);
+    // Track the open dialog so the layout-row handlers can toast back to it.
+    a.settings_dialog = dialog;
+    _ = adw.Dialog.signals.closed.connect(dialog.as(adw.Dialog), *AppContext, onSettingsClosed, a, .{});
     dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+}
+
+fn onSettingsClosed(_: *adw.Dialog, a: *AppContext) callconv(.c) void {
+    a.settings_dialog = null;
+}
+
+/// Post a short toast to the open Settings dialog (no-op if it's closed).
+fn settingsToast(a: *AppContext, title: [*:0]const u8) void {
+    const dialog = a.settings_dialog orelse return;
+    const toast = adw.Toast.new(title);
+    toast.setTimeout(2);
+    dialog.addToast(toast);
+}
+
+fn onSaveDefaultLayoutRow(_: *adw.ButtonRow, a: *AppContext) callconv(.c) void {
+    const bytes = a.workspace.serialize(a.alloc) catch |err| {
+        log.warn("could not serialize layout for default err={}", .{err});
+        settingsToast(a, "Couldn't save default layout");
+        return;
+    };
+    defer a.alloc.free(bytes);
+    project.writeDefaultLayout(a.alloc, bytes);
+    settingsToast(a, "Saved current layout as the default");
+}
+
+fn onClearDefaultLayoutRow(_: *adw.ButtonRow, a: *AppContext) callconv(.c) void {
+    project.clearDefaultLayout(a.alloc);
+    settingsToast(a, "Default reset to the built-in 2×2");
 }
 
 fn onShowSettings(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
@@ -2531,6 +2612,14 @@ fn onFfmToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *AppContext) call
             sa.setState(glib.Variant.newBoolean(@intFromBool(on)));
         }
     }
+}
+
+fn onPaneTitlesToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *AppContext) callconv(.c) void {
+    const on = row.getActive() != 0;
+    tree.setShowPaneTitles(on);
+    a.workspace.applyTitleVisibility(); // live across every open pane
+    a.config.show_pane_titles = on;
+    a.config.save();
 }
 
 fn onToggleFollowMouse(action: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {

@@ -12,8 +12,10 @@
 //! (dimmed) so they stay editable — Typora's "source on the active block". We
 //! only ever apply/remove tags; the buffer text is never mutated, so autosave
 //! and `copyTextToSend` always see the raw markdown. Tag colors are derived from
-//! the live GTK theme foreground (`getColor`) so they follow the Omarchy theme;
-//! the base font comes from a `.roost-scratchpad` CSS class (see app.zig).
+//! the live GTK theme — the foreground (`getColor`) for dim/quote text and the
+//! named accent color (`themeAccent`, Catppuccin's accent on Omarchy) for
+//! headings and inline code — so they follow the system theme; the base font
+//! comes from a `.roost-scratchpad` CSS class (see app.zig).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -78,10 +80,16 @@ pub const ScratchpadPane = struct {
         const text_view = gtk.TextView.new();
         text_view.setEditable(1);
         text_view.setWrapMode(.word_char);
-        text_view.setLeftMargin(8);
-        text_view.setRightMargin(8);
-        text_view.setTopMargin(8);
-        text_view.setBottomMargin(8);
+        // Generous internal padding so the notes editor feels like a document,
+        // not a cramped terminal.
+        text_view.setLeftMargin(18);
+        text_view.setRightMargin(18);
+        text_view.setTopMargin(16);
+        text_view.setBottomMargin(16);
+        // Breathing room between lines (and between wrapped rows of one line).
+        text_view.setPixelsAboveLines(3);
+        text_view.setPixelsBelowLines(3);
+        text_view.setPixelsInsideWrap(2);
         // Base font comes from CSS (`.roost-scratchpad`, built from config in
         // app.zig); the default there is monospace, so we drop setMonospace.
         text_view.as(gtk.Widget).addCssClass("roost-scratchpad");
@@ -198,12 +206,21 @@ pub const ScratchpadPane = struct {
         // Refresh theme-derived colors so a light/dark switch is picked up.
         var fg: gdk.RGBA = undefined;
         self.text_view.as(gtk.Widget).getColor(&fg);
+        // The active GTK/libadwaita theme's accent color (Catppuccin's accent on
+        // Omarchy) — used to tint headings and inline code so the scratchpad
+        // tracks the system theme. Falls back to the plain foreground when the
+        // theme exposes no named accent (so headings still render, just uncolored).
+        var accent = themeAccent(self.text_view.as(gtk.Widget), fg);
         var dim = fg;
         dim.f_alpha = 0.40;
         var quote_fg = fg;
         quote_fg.f_alpha = 0.65;
-        var code_bg = fg;
-        code_bg.f_alpha = 0.08;
+        // Inline code gets a faint accent-tinted background (vs. a flat grey).
+        var code_bg = accent;
+        code_bg.f_alpha = 0.13;
+        setRgba(self.tags.h1, "foreground-rgba", &accent);
+        setRgba(self.tags.h2, "foreground-rgba", &accent);
+        setRgba(self.tags.h3, "foreground-rgba", &accent);
         setRgba(self.tags.marker_dim, "foreground-rgba", &dim);
         setRgba(self.tags.quote, "foreground-rgba", &quote_fg);
         setRgba(self.tags.code, "background-rgba", &code_bg);
@@ -329,6 +346,22 @@ pub const ScratchpadPane = struct {
         return spanOrNull(buffer.getText(&start, &end, 1));
     }
 };
+
+/// Resolve the active theme's accent color from `widget`'s style context,
+/// returning `fallback` (the plain foreground) when the theme defines none. Tries
+/// the libadwaita standalone accent first (meant for text on the window
+/// background — ideal for headings), then the bg/legacy names. `getStyleContext`
+/// is deprecated in GTK4 but is still the only way to resolve a named theme color
+/// for an arbitrary widget.
+fn themeAccent(widget: *gtk.Widget, fallback: gdk.RGBA) gdk.RGBA {
+    const ctx = widget.getStyleContext();
+    const names = [_][*:0]const u8{ "accent_color", "accent_bg_color", "theme_selected_bg_color" };
+    for (names) |name| {
+        var rgba: gdk.RGBA = undefined;
+        if (ctx.lookupColor(name, &rgba) != 0) return rgba;
+    }
+    return fallback;
+}
 
 /// Create the reusable styling tags on `buffer`'s tag table. Anonymous (we apply
 /// by pointer). Color-bearing tags get their `*-rgba` set per restyle.

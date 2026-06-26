@@ -52,6 +52,23 @@ pub fn followMouseEnabled() bool {
     return follow_mouse;
 }
 
+/// Show the per-pane role title (the small header label above each pane). App-
+/// wide (not per-tree), so a module global; the Settings switch toggles it live.
+/// Default on. Read by `labeledBox` for a new pane's initial visibility and by
+/// `Tree.applyTitleVisibility` to update existing panes.
+var show_pane_titles: bool = true;
+
+/// Set the show-pane-titles preference (applied to NEW panes via `labeledBox`;
+/// call `Workspace.applyTitleVisibility` to update already-open panes).
+pub fn setShowPaneTitles(on: bool) void {
+    show_pane_titles = on;
+}
+
+/// Current show-pane-titles state (to initialize UI that reflects it).
+pub fn paneTitlesShown() bool {
+    return show_pane_titles;
+}
+
 /// The semantic roles a pane can have. Extensible: add a variant + its `title`
 /// and `spawn` behavior (in `Tree.spawnPane`) and everything else follows.
 pub const Role = enum {
@@ -538,6 +555,23 @@ pub const Tree = struct {
             .split => |*s| {
                 self.walkLeaves(s.start, counter, want, out);
                 self.walkLeaves(s.end, counter, want, out);
+            },
+        }
+    }
+
+    /// Apply the current `show_pane_titles` preference to every open pane's header
+    /// label (live toggle from Settings). Hiding the label drops its allocated
+    /// height, so the terminal/scratchpad content reclaims the space.
+    pub fn applyTitleVisibility(self: *Tree) void {
+        titleVisibilityWalk(self.root);
+    }
+
+    fn titleVisibilityWalk(node: *Node) void {
+        switch (node.*) {
+            .leaf => |*l| l.label.as(gtk.Widget).setVisible(@intFromBool(show_pane_titles)),
+            .split => |*s| {
+                titleVisibilityWalk(s.start);
+                titleVisibilityWalk(s.end);
             },
         }
     }
@@ -1452,6 +1486,9 @@ fn labeledBox(role: Role, content: *gtk.Widget) struct { box: *gtk.Box, label: *
     label.as(gtk.Widget).setMarginEnd(8);
     label.as(gtk.Widget).setMarginTop(4);
     label.as(gtk.Widget).setMarginBottom(4);
+    // Honor the show-pane-titles preference for the pane's initial state; the
+    // hidden label keeps no allocated height so the terminal grid uses the space.
+    label.as(gtk.Widget).setVisible(@intFromBool(show_pane_titles));
 
     content.setVexpand(1);
     content.setHexpand(1);

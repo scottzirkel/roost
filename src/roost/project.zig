@@ -186,6 +186,72 @@ fn writeLayoutImpl(alloc: Allocator, project_path: []const u8, bytes: []const u8
     log.info("saved layout ({d} bytes)", .{bytes.len});
 }
 
+// --- Default layout -------------------------------------------------------
+//
+// A single user-wide "default layout" (vs. the per-project layouts above): the
+// arrangement a project/worktree with NO saved layout of its own opens with,
+// replacing the hardcoded built-in 2x2. Stored as the same serialized layout
+// JSON at `<xdg-config>/roost/default-layout.json`. Set via "save current layout
+// as default" in Settings; cleared to fall back to the built-in default.
+
+/// Path to the user default-layout file. Caller frees.
+fn defaultLayoutPath(alloc: Allocator) ![]u8 {
+    const dir = try internal_os.xdg.config(alloc, .{ .subdir = "roost" });
+    defer alloc.free(dir);
+    return std.fs.path.join(alloc, &.{ dir, "default-layout.json" });
+}
+
+/// Read the user default layout JSON, or null if none is set (caller then builds
+/// the built-in default tree). Never throws on a missing file.
+pub fn readDefaultLayout(alloc: Allocator) ?[]u8 {
+    const path = defaultLayoutPath(alloc) catch return null;
+    defer alloc.free(path);
+    return std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024) catch |err| {
+        if (err != error.FileNotFound) {
+            log.warn("could not read default layout '{s}' err={}", .{ path, err });
+        }
+        return null;
+    };
+}
+
+/// Whether the user has saved a custom default layout (for the Settings UI).
+pub fn hasDefaultLayout(alloc: Allocator) bool {
+    const path = defaultLayoutPath(alloc) catch return false;
+    defer alloc.free(path);
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// Write the user default layout JSON. Best-effort: logs and returns on error.
+pub fn writeDefaultLayout(alloc: Allocator, bytes: []const u8) void {
+    writeDefaultLayoutImpl(alloc, bytes) catch |err| {
+        log.warn("could not write default layout err={}", .{err});
+    };
+}
+
+fn writeDefaultLayoutImpl(alloc: Allocator, bytes: []const u8) !void {
+    const path = try defaultLayoutPath(alloc);
+    defer alloc.free(path);
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = bytes });
+    log.info("saved default layout ({d} bytes)", .{bytes.len});
+}
+
+/// Delete the user default layout (reset to the built-in default). Best-effort;
+/// a missing file is treated as success.
+pub fn clearDefaultLayout(alloc: Allocator) void {
+    const path = defaultLayoutPath(alloc) catch return;
+    defer alloc.free(path);
+    std.fs.cwd().deleteFile(path) catch |err| {
+        if (err != error.FileNotFound) log.warn("could not clear default layout err={}", .{err});
+    };
+}
+
 /// Read the recent-projects list (most-recent-first). Returns an owned slice of
 /// owned strings; caller frees each entry then the slice. Missing file => empty.
 pub fn readRecents(alloc: Allocator) ![][]const u8 {

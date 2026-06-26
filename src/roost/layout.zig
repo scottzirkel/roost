@@ -230,6 +230,12 @@ pub const Workspace = struct {
         return self.t.serialize(alloc);
     }
 
+    /// Apply the current show-pane-titles preference to every open pane (live
+    /// toggle from Settings). Set `tree.setShowPaneTitles` first.
+    pub fn applyTitleVisibility(self: *Workspace) void {
+        self.t.applyTitleVisibility();
+    }
+
     /// Re-apply the app theme to all terminal panes (best-effort).
     pub fn setTheme(self: *Workspace) void {
         setThemeWalk(self.t.root);
