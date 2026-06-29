@@ -22,6 +22,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const gtk = @import("gtk");
+const gdk = @import("gdk");
 const gobject = @import("gobject");
 const glib = @import("glib");
 
@@ -390,6 +391,8 @@ pub const Tree = struct {
         if (node.leaf.pane == .scratchpad) node.leaf.pane.scratchpad.wire();
         // Focus-follows-mouse: focus this leaf when the pointer enters its box.
         attachFollowMouse(node, lb.box);
+        // Agent panes: remap a bare Ctrl+Z to Claude Code's undo (see helper).
+        if (role == .agent and pane == .terminal) attachAgentUndoRemap(node, lb.box);
         return node;
     }
 
@@ -1467,6 +1470,43 @@ fn onLeafEnter(_: *gtk.EventControllerMotion, _: f64, _: f64, node: *Node) callc
     if (!follow_mouse) return;
     if (node.* != .leaf) return; // defensive; a leaf node never changes variant
     node.leaf.pane.focus();
+}
+
+/// Intercept a bare Ctrl+Z on an Agent pane and remap it to Claude Code's undo
+/// (Ctrl+_, the C0 control byte 0x1F). Claude Code has NO Ctrl+Z binding, so
+/// the keystroke otherwise falls through as Unix SIGTSTP — but the Agent pane
+/// has no job-control shell, so the suspended `claude` can't be `fg`'d and is
+/// stranded. We attach a CAPTURE-phase key controller to the leaf box (an
+/// ancestor of the embedded Surface), so it runs BEFORE the Surface's own key
+/// handling: swallowing the event keeps the 0x1F byte's SIGTSTP-triggering
+/// sibling from ever reaching the PTY, and we inject the undo byte instead.
+/// Scoped to Agent panes only — shell/git panes keep real Ctrl+Z suspend (they
+/// have a job-control shell that can `fg`). The controller is owned by the box,
+/// torn down with it before the node is freed (same lifetime as `onLeafEnter`).
+fn attachAgentUndoRemap(node: *Node, box: *gtk.Box) void {
+    const key = gtk.EventControllerKey.new();
+    key.as(gtk.EventController).setPropagationPhase(.capture);
+    _ = gtk.EventControllerKey.signals.key_pressed.connect(key, *Node, onAgentKeyPressed, node, .{});
+    box.as(gtk.Widget).addController(key.as(gtk.EventController));
+}
+
+fn onAgentKeyPressed(
+    _: *gtk.EventControllerKey,
+    keyval: c_uint,
+    _: c_uint,
+    state: gdk.ModifierType,
+    node: *Node,
+) callconv(.c) c_int {
+    // A bare Ctrl+Z only. Ctrl+Z carries no shift so the keyval is lowercase
+    // 'z' (or 'Z' under Caps Lock); reject any shift/alt/super combo so e.g.
+    // Ctrl+Shift+Z is left untouched.
+    if (keyval != 'z' and keyval != 'Z') return 0;
+    if (!state.control_mask) return 0;
+    if (state.shift_mask or state.alt_mask or state.super_mask) return 0;
+    // Defensive: only act on a live Agent terminal leaf.
+    if (node.* != .leaf or node.leaf.role != .agent or node.leaf.pane != .terminal) return 0;
+    node.leaf.pane.terminal.sendInput("\x1f"); // Ctrl+_ → Claude Code undo
+    return 1; // stop propagation: the embedded Surface never sees the Ctrl+Z
 }
 
 /// Wrap a pane's content widget in a vertical box with a small role header.

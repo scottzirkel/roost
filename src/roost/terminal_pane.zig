@@ -96,6 +96,18 @@ pub const TerminalPane = union(enum) {
         }
     }
 
+    /// Inject `bytes` into the pane's child as *typed* terminal input rather
+    /// than a clipboard paste. The distinction matters for control bytes (e.g.
+    /// 0x1F = Ctrl+_): `sendText`/`paste` go through bracketed paste, which the
+    /// child app would either strip or treat as literal data, whereas this path
+    /// writes the bytes straight to the PTY as if the user typed them. Used to
+    /// remap a key to a control sequence the child understands. Best-effort.
+    pub fn sendInput(self: *TerminalPane, bytes: []const u8) void {
+        switch (self.*) {
+            inline else => |*b| b.sendInput(bytes),
+        }
+    }
+
     /// Re-apply the application theme/config to this pane (best-effort).
     pub fn setTheme(self: *TerminalPane) void {
         switch (self.*) {
@@ -218,6 +230,24 @@ pub const GhosttyTerminalPane = struct {
         };
         core.completeClipboardRequest(.paste, bytes, true) catch |err| {
             log.warn("sendText: completeClipboardRequest failed err={}", .{err});
+        };
+    }
+
+    fn sendInput(self: *GhosttyTerminalPane, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        const core = self.surface.core() orelse {
+            log.warn("sendInput: surface not realized yet, dropping {d} bytes", .{bytes.len});
+            return;
+        };
+        // Nothing to type into a dead child (the pane auto-closes on exit, so
+        // this is just defensive).
+        if (core.child_exited) return;
+        // The `.text` binding action parses Zig string escapes and writes the
+        // result straight to the PTY (no bracketed paste). Our callers pass raw
+        // control bytes, which contain no backslash, so they pass through
+        // verbatim. This mirrors a `keybind = …=text:…` exactly.
+        _ = core.performBindingAction(.{ .text = bytes }) catch |err| {
+            log.warn("sendInput: performBindingAction failed err={}", .{err});
         };
     }
 
