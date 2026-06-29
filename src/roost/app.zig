@@ -37,6 +37,7 @@ const Project = project.Project;
 const ipc = @import("ipc.zig");
 const git = @import("git.zig");
 const actions = @import("actions.zig");
+const ansi = @import("ansi.zig");
 
 const log = std.log.scoped(.roost);
 
@@ -1897,6 +1898,9 @@ const ActionRun = struct {
     on_failure: ?actions.Route,
     // Live state (MAIN THREAD ONLY):
     output: std.ArrayListUnmanaged(u8) = .empty,
+    /// Strips ANSI/VT escape codes from streamed chunks before they hit `output`
+    /// (and the live view) — see `onActionChunk`. State carries across chunks.
+    stripper: ansi.Stripper = .{},
     done: bool = false,
     /// The activity modal's text view showing this run live, or null.
     view: ?*gtk.TextView = null,
@@ -2034,8 +2038,16 @@ fn onActionChunk(data: ?*anyopaque) callconv(.c) c_int {
         ca.destroy(msg);
     }
     if (!actions_alive) return 0;
-    msg.run.output.appendSlice(ca, msg.bytes) catch {};
-    if (msg.run.view) |view| appendToTextView(view, msg.bytes);
+    // Strip escape codes before storing/showing: the output is read back into a
+    // plain TextView, the scratchpad, or a terminal's INPUT — none of which want
+    // raw SGR/CSI bytes (a terminal would interpret them as keystrokes).
+    var clean: std.ArrayListUnmanaged(u8) = .empty;
+    defer clean.deinit(ca);
+    msg.run.stripper.feed(ca, &clean, msg.bytes) catch {};
+    if (clean.items.len > 0) {
+        msg.run.output.appendSlice(ca, clean.items) catch {};
+        if (msg.run.view) |view| appendToTextView(view, clean.items);
+    }
     return 0;
 }
 
@@ -2194,6 +2206,10 @@ fn updateActivityIndicator(a: *AppContext) void {
 const Activity = struct {
     a: *AppContext,
     runs: std.ArrayListUnmanaged(*ActionRun),
+    /// The "send output" target picker, and the open panes it indexes (tree
+    /// order; same indices). Captured when the modal opens; freed on close.
+    dropdown: ?*gtk.DropDown = null,
+    panes: []layout.PaneRef = &.{},
 };
 
 fn onActivityClicked(_: *gtk.Button, a: *AppContext) callconv(.c) void {
@@ -2201,7 +2217,8 @@ fn onActivityClicked(_: *gtk.Button, a: *AppContext) callconv(.c) void {
 }
 
 /// Open a wide modal showing each currently-active run's output live (read-only),
-/// with Copy + Send-to-pane buttons. Snapshots the runs active at open time.
+/// with Copy + a "Send output" button and a pane picker. Snapshots the runs
+/// active at open time.
 fn presentActivityModal(a: *AppContext) void {
     if (active_runs.items.len == 0) {
         const d = adw.AlertDialog.new("No actions running", "Nothing is running right now.");
@@ -2253,7 +2270,8 @@ fn presentActivityModal(a: *AppContext) void {
         vbox.append(scroller.as(gtk.Widget));
     }
 
-    // Stop (destructive) + copy + send-to-pane row.
+    // Stop (destructive) + Copy + a "Send output" button paired with a dropdown
+    // that lists the currently-open panes (default: scratchpad).
     const row = gtk.Box.new(.horizontal, 6);
     row.as(gtk.Widget).setMarginTop(4);
     const stop = gtk.Button.newWithLabel("Stop");
@@ -2261,9 +2279,12 @@ fn presentActivityModal(a: *AppContext) void {
     _ = gtk.Button.signals.clicked.connect(stop, *Activity, onActivityStop, act, .{});
     row.append(stop.as(gtk.Widget));
     appendActivityButton(row, "Copy", onActivityCopy, act);
-    appendActivityButton(row, "Send to Agent", onActivitySendAgent, act);
-    appendActivityButton(row, "Send to Shell", onActivitySendShell, act);
-    appendActivityButton(row, "Send to Scratchpad", onActivitySendScratch, act);
+    if (buildPanePicker(ca, act)) |dd| {
+        const send = gtk.Button.newWithLabel("Send output");
+        _ = gtk.Button.signals.clicked.connect(send, *Activity, onActivitySend, act, .{});
+        row.append(send.as(gtk.Widget));
+        row.append(dd.as(gtk.Widget));
+    }
     vbox.append(row.as(gtk.Widget));
 
     const dialog = adw.AlertDialog.new("Action Output", null);
@@ -2312,20 +2333,61 @@ fn onActivityCopy(btn: *gtk.Button, act: *Activity) callconv(.c) void {
     btn.as(gtk.Widget).getClipboard().setText(z);
 }
 
-fn sendActivityTo(act: *Activity, role: tree.Role) void {
-    const text = activityText(act, act.a.alloc) orelse return;
-    defer act.a.alloc.free(text);
-    _ = act.a.workspace.routeToRole(role, text);
+/// Snapshot the open panes into `act.panes` and build the "send output" target
+/// dropdown over them (label = role title, numbered per-role on repeats, e.g.
+/// "Shell", "Shell 2"). Defaults the selection to the first scratchpad pane.
+/// Returns null (and leaves `act.panes` empty) if there are no panes / on OOM —
+/// the caller then omits the Send controls. `act.panes` is freed on modal close.
+fn buildPanePicker(ca: std.mem.Allocator, act: *Activity) ?*gtk.DropDown {
+    const panes = act.a.workspace.collectPanes(ca) catch return null;
+    if (panes.len == 0) {
+        ca.free(panes);
+        return null;
+    }
+    act.panes = panes;
+
+    // NULL-terminated array of label C-strings for gtk_drop_down_new_from_strings
+    // (GTK copies them into its own model, so we free ours right after).
+    const cstrs = ca.allocSentinel(?[*:0]const u8, panes.len, null) catch return null;
+    defer {
+        for (cstrs[0..panes.len]) |p| if (p) |s| ca.free(std.mem.span(s));
+        ca.free(cstrs);
+    }
+    for (panes, 0..) |pr, i| {
+        var occ: usize = 0; // how many earlier panes share this role
+        for (panes[0..i]) |prev| {
+            if (prev.role == pr.role) occ += 1;
+        }
+        const title = pr.role.title();
+        cstrs[i] = if (occ == 0)
+            (ca.dupeZ(u8, title) catch return null).ptr
+        else
+            (std.fmt.allocPrintSentinel(ca, "{s} {d}", .{ title, occ + 1 }, 0) catch return null).ptr;
+    }
+
+    const dd = gtk.DropDown.newFromStrings(@ptrCast(cstrs.ptr));
+    // Default target: the first scratchpad pane, if one is open.
+    for (panes, 0..) |pr, i| {
+        if (pr.role == .scratchpad) {
+            dd.setSelected(@intCast(i));
+            break;
+        }
+    }
+    act.dropdown = dd;
+    return dd;
 }
 
-fn onActivitySendAgent(_: *gtk.Button, act: *Activity) callconv(.c) void {
-    sendActivityTo(act, .agent);
-}
-fn onActivitySendShell(_: *gtk.Button, act: *Activity) callconv(.c) void {
-    sendActivityTo(act, .shell);
-}
-fn onActivitySendScratch(_: *gtk.Button, act: *Activity) callconv(.c) void {
-    sendActivityTo(act, .scratchpad);
+/// "Send output" clicked: deliver the shown output to the pane selected in the
+/// dropdown. No-op if nothing is selected or the pane has since closed.
+fn onActivitySend(_: *gtk.Button, act: *Activity) callconv(.c) void {
+    const dd = act.dropdown orelse return;
+    const sel = dd.getSelected();
+    if (sel == gtk.INVALID_LIST_POSITION) return;
+    const i: usize = @intCast(sel);
+    if (i >= act.panes.len) return;
+    const text = activityText(act, act.a.alloc) orelse return;
+    defer act.a.alloc.free(text);
+    _ = act.a.workspace.routeToPane(act.panes[i].node, text);
 }
 
 /// Stop every still-running action shown in this modal.
@@ -2346,6 +2408,7 @@ fn onActivityClosed(_: *adw.Dialog, act: *Activity) callconv(.c) void {
         }
     }
     act.runs.deinit(ca);
+    if (act.panes.len > 0) ca.free(act.panes);
     ca.destroy(act);
 }
 

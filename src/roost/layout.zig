@@ -29,6 +29,7 @@ const log = std.log.scoped(.roost_layout);
 pub const Role = tree.Role;
 pub const Direction = tree.Direction;
 pub const AgentStatus = tree.AgentStatus;
+pub const PaneRef = tree.Tree.PaneRef;
 
 pub const Workspace = struct {
     t: Tree,
@@ -216,6 +217,17 @@ pub const Workspace = struct {
     /// terminal injection; scratchpad → append). Returns true if delivered.
     pub fn routeToRole(self: *Workspace, role: tree.Role, bytes: []const u8) bool {
         return self.t.routeToRole(role, bytes);
+    }
+
+    /// Every open pane in tree order, for the "send output to pane" dropdown.
+    /// Owned by `alloc` (free the slice; the nodes belong to the workspace).
+    pub fn collectPanes(self: *Workspace, alloc: std.mem.Allocator) std.mem.Allocator.Error![]PaneRef {
+        return self.t.collectPanes(alloc);
+    }
+
+    /// Route wired-action output to ONE specific open pane (see Tree.routeToPane).
+    pub fn routeToPane(self: *Workspace, node: *tree.Node, bytes: []const u8) bool {
+        return self.t.routeToPane(node, bytes);
     }
 
     /// Snapshot the Agent pane's terminal text into the scratchpad. Returns a

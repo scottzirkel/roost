@@ -747,6 +747,40 @@ pub const Tree = struct {
         return true;
     }
 
+    /// A reference to one open pane: the leaf node plus its role. Returned by
+    /// `collectPanes` so callers can offer "send output to THIS pane" choices.
+    pub const PaneRef = struct { node: *Node, role: Role };
+
+    /// Every open pane, in tree order (top/left → bottom/right). Owned by
+    /// `alloc` (free the slice; the nodes belong to the tree). Used to build the
+    /// action-output "send to pane" dropdown.
+    pub fn collectPanes(self: *Tree, alloc: Allocator) Allocator.Error![]PaneRef {
+        var list: std.ArrayListUnmanaged(PaneRef) = .empty;
+        errdefer list.deinit(alloc);
+        try collectPanesWalk(self.root, alloc, &list);
+        return list.toOwnedSlice(alloc);
+    }
+
+    /// Route `bytes` to ONE specific open pane (not by role). The node is
+    /// verified to still be in the tree first, so a stale reference (pane closed
+    /// after the list was built) is a no-op rather than a use-after-free.
+    /// Terminals receive it as typed input; the scratchpad appends it as text.
+    /// Returns false if the node is gone / not a leaf / `bytes` is empty.
+    pub fn routeToPane(self: *Tree, node: *Node, bytes: []const u8) bool {
+        if (bytes.len == 0) return false;
+        if (!nodeContains(self.root, node)) return false;
+        if (node.* != .leaf) return false;
+        switch (node.leaf.pane) {
+            .scratchpad => |*sp| sp.appendText(bytes),
+            .terminal => |*t| {
+                const z = self.alloc.dupeZ(u8, bytes) catch return false;
+                defer self.alloc.free(z);
+                t.sendText(z);
+            },
+        }
+        return true;
+    }
+
     /// First terminal leaf whose role == `role` (tree order); if none, the first
     /// terminal leaf of ANY role; null if there are no terminal panes.
     fn firstTerminalLeafPreferringRole(self: *Tree, role: Role) ?*Node {
@@ -1248,6 +1282,27 @@ fn leafOfRoleWalk(node: *Node, want: Role, out: *?*Node) void {
             leafOfRoleWalk(s.end, want, out);
         },
     }
+}
+
+/// Append every leaf in the subtree (tree order) to `out` as a `PaneRef`.
+fn collectPanesWalk(node: *Node, alloc: Allocator, out: *std.ArrayListUnmanaged(Tree.PaneRef)) Allocator.Error!void {
+    switch (node.*) {
+        .leaf => |*l| try out.append(alloc, .{ .node = node, .role = l.role }),
+        .split => |*s| {
+            try collectPanesWalk(s.start, alloc, out);
+            try collectPanesWalk(s.end, alloc, out);
+        },
+    }
+}
+
+/// Whether `target` is somewhere in the subtree rooted at `node` (pointer
+/// identity). Guards `routeToPane` against a reference to an already-closed pane.
+fn nodeContains(node: *Node, target: *Node) bool {
+    if (node == target) return true;
+    return switch (node.*) {
+        .leaf => false,
+        .split => |*s| nodeContains(s.start, target) or nodeContains(s.end, target),
+    };
 }
 
 /// The first leaf in tree order within the subtree rooted at `node`.
