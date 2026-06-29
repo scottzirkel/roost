@@ -38,6 +38,11 @@ const log = std.log.scoped(.roost_tree);
 /// runtime. Default on. Read by every leaf's motion controller (`onLeafEnter`).
 var follow_mouse: bool = true;
 
+/// Dwell before focus-follows-mouse steals focus, so a quick pass-through of a
+/// pane on the way somewhere else doesn't grab it. Cancelled if the pointer
+/// leaves before it elapses.
+const follow_mouse_dwell_ms: c_uint = 150;
+
 /// Flip focus-follows-mouse and return the new state (for the toggle action).
 pub fn setFollowMouse(on: bool) void {
     follow_mouse = on;
@@ -174,6 +179,10 @@ pub const Leaf = struct {
     /// The header `gtk.Label` (the box's first child). Stored so we can update
     /// it in place for the Agent-pane status badge without re-walking widgets.
     label: *gtk.Label,
+    /// Pending focus-follows-mouse dwell timer (glib source id, 0 = none). Set on
+    /// pointer-enter, cleared on leave/fire; removed at teardown so the one-shot
+    /// can't fire on a freed node. See `attachFollowMouse`.
+    dwell_source: c_uint = 0,
 };
 
 /// A split node: a gtk.Paned with two child nodes.
@@ -522,7 +531,10 @@ pub const Tree = struct {
 
     fn destroyNode(self: *Tree, node: *Node) void {
         switch (node.*) {
-            .leaf => |*l| l.pane.destroy(),
+            .leaf => |*l| {
+                cancelDwell(l);
+                l.pane.destroy();
+            },
             .split => |*s| {
                 self.destroyNode(s.start);
                 self.destroyNode(s.end);
@@ -530,6 +542,15 @@ pub const Tree = struct {
         }
         if (self.highlighted == node) self.highlighted = null;
         self.alloc.destroy(node);
+    }
+
+    /// Remove a leaf's pending focus-follows-mouse dwell timer (if any) so the
+    /// one-shot can't fire on a node about to be freed.
+    fn cancelDwell(l: *Leaf) void {
+        if (l.dwell_source != 0) {
+            _ = glib.Source.remove(l.dwell_source);
+            l.dwell_source = 0;
+        }
     }
 
     // --- Focus ------------------------------------------------------------
@@ -947,6 +968,7 @@ pub const Tree = struct {
         // Guard the destroy: `pane.destroy()` re-emits this surface's
         // close-request, which must not re-enter and double-free this node.
         if (self.highlighted == leaf) self.highlighted = null;
+        cancelDwell(&leaf.leaf);
         self.tearing_down = true;
         leaf.leaf.pane.destroy();
         self.tearing_down = false;
@@ -1463,13 +1485,35 @@ fn panedIntProp(paned: *gtk.Paned, name: [:0]const u8) c_int {
 fn attachFollowMouse(node: *Node, box: *gtk.Box) void {
     const motion = gtk.EventControllerMotion.new();
     _ = gtk.EventControllerMotion.signals.enter.connect(motion, *Node, onLeafEnter, node, .{});
+    _ = gtk.EventControllerMotion.signals.leave.connect(motion, *Node, onLeafLeave, node, .{});
     box.as(gtk.Widget).addController(motion.as(gtk.EventController));
 }
 
 fn onLeafEnter(_: *gtk.EventControllerMotion, _: f64, _: f64, node: *Node) callconv(.c) void {
     if (!follow_mouse) return;
     if (node.* != .leaf) return; // defensive; a leaf node never changes variant
+    // Don't grab focus immediately: arm a dwell timer so a quick pass-through
+    // doesn't steal focus. A still-pending timer (re-entered without leaving) is
+    // left as-is. The timer is removed on leave and at teardown.
+    if (node.leaf.dwell_source != 0) return;
+    node.leaf.dwell_source = glib.timeoutAdd(follow_mouse_dwell_ms, onLeafDwell, node);
+}
+
+fn onLeafLeave(_: *gtk.EventControllerMotion, node: *Node) callconv(.c) void {
+    if (node.* != .leaf) return;
+    if (node.leaf.dwell_source != 0) {
+        _ = glib.Source.remove(node.leaf.dwell_source);
+        node.leaf.dwell_source = 0;
+    }
+}
+
+fn onLeafDwell(data: ?*anyopaque) callconv(.c) c_int {
+    const node: *Node = @ptrCast(@alignCast(data.?));
+    if (node.* == .leaf) node.leaf.dwell_source = 0;
+    if (!follow_mouse) return 0; // toggled off mid-dwell
+    if (node.* != .leaf) return 0;
     node.leaf.pane.focus();
+    return 0; // G_SOURCE_REMOVE — one-shot
 }
 
 /// Intercept a bare Ctrl+Z on an Agent pane and remap it to Claude Code's undo
