@@ -448,8 +448,19 @@ pub fn run() !void {
 
     // Desktop launch that resolved no last project (e.g. first-ever run): pop the
     // chooser so the user can pick a recent or open/create one.
-    if (project_dir == null and internal_os.launchedFromDesktop()) {
+    const showing_chooser = project_dir == null and internal_os.launchedFromDesktop();
+    if (showing_chooser) {
         presentChooser(&app_ctx);
+    }
+
+    // First-run discoverability: once ever, after a real workspace is up, point
+    // the user at the keyboard cheat-sheet. Skipped when the chooser is showing
+    // (no project) so two dialogs don't stack — it then shows on the next launch
+    // that opens a project. Best-effort; a missing/unwritable config dir just
+    // means it stays silent.
+    if (!showing_chooser and !firstRunDone(alloc)) {
+        markFirstRunDone(alloc);
+        presentFirstRunHint(&app_ctx);
     }
 
     // 9. Run our own loop, ticking the core app each iteration.
@@ -1480,18 +1491,23 @@ const WorktreeReq = struct {
     app_ctx: *AppContext,
     entry: *gtk.Entry,
     repo_root: []u8,
+    /// When true, open the new worktree in a NEW detached window (the chooser's
+    /// "New Worktree…" path) instead of switching this window into it (Ctrl+Shift+B).
+    new_window: bool,
 };
 
 /// `win.create-worktree` (Ctrl+Shift+B): prompt for a branch name, then create
 /// `<repo>/../<repo-name>.worktrees/<branch>` as a new worktree+branch and
 /// switch the whole workspace into it (reusing `rebuildWorkspace`).
 fn onCreateWorktree(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    beginCreateWorktree(a);
+    beginCreateWorktree(a, false);
 }
 
-/// Prompt for a branch name, then create `<repo>.worktrees/<branch>` and switch
-/// into it. Shared by the Ctrl+Shift+B action and the chooser's "New…" action.
-fn beginCreateWorktree(a: *AppContext) void {
+/// Prompt for a branch name, then create `<repo>.worktrees/<branch>`. Shared by
+/// the Ctrl+Shift+B action (`new_window = false`: switch THIS window into it) and
+/// the chooser's "New Worktree…" entry (`new_window = true`: open it detached, so
+/// the chooser matches its other "New Window" semantics and leaves this window).
+fn beginCreateWorktree(a: *AppContext, new_window: bool) void {
     if (!commandOnPath("git")) {
         errorAlert(a.window, "Git not found", "`git` is not on your PATH.");
         return;
@@ -1514,9 +1530,13 @@ fn beginCreateWorktree(a: *AppContext) void {
     entry.setPlaceholderText("branch-name");
     entry.setActivatesDefault(1); // Enter in the entry triggers the default response
 
-    req.* = .{ .app_ctx = a, .entry = entry, .repo_root = repo_root };
+    req.* = .{ .app_ctx = a, .entry = entry, .repo_root = repo_root, .new_window = new_window };
 
-    const dialog = adw.AlertDialog.new("New worktree", "Create a new branch + worktree and switch to it.");
+    const subtitle = if (new_window)
+        "Create a new branch + worktree and open it in a new window."
+    else
+        "Create a new branch + worktree and switch to it.";
+    const dialog = adw.AlertDialog.new("New worktree", subtitle);
     dialog.setExtraChild(entry.as(gtk.Widget));
     dialog.addResponse("cancel", "Cancel");
     dialog.addResponse("create", "Create");
@@ -1581,7 +1601,13 @@ fn onWorktreeResponse(
         return;
     }
 
-    rebuildWorkspace(a, dest);
+    // Chooser "New Worktree…" opens the fresh worktree detached (this window
+    // stays put); Ctrl+Shift+B switches this window into it.
+    if (req.new_window) {
+        openProjectNewWindow(a, dest);
+    } else {
+        rebuildWorkspace(a, dest);
+    }
 }
 
 // --- Destructive-action confirmation --------------------------------------
@@ -1669,6 +1695,54 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build" },
     .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
 };
+
+// --- First-run hint -------------------------------------------------------
+// A one-time welcome that points the user at the keyboard cheat-sheet, gated by
+// a marker file at `<config>/roost/first-run-done`.
+
+/// Path to the first-run marker. Caller frees. Null if the config dir can't be
+/// resolved (we then treat first-run as "done" so we never nag in a loop).
+fn firstRunMarkerPath(alloc: std.mem.Allocator) ?[]u8 {
+    const dir = internal_os.xdg.config(alloc, .{ .subdir = "roost" }) catch return null;
+    defer alloc.free(dir);
+    return std.fs.path.join(alloc, &.{ dir, "first-run-done" }) catch null;
+}
+
+/// True if the first-run hint has already been shown (or can't be tracked).
+fn firstRunDone(alloc: std.mem.Allocator) bool {
+    const path = firstRunMarkerPath(alloc) orelse return true;
+    defer alloc.free(path);
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// Record that the first-run hint has been shown (best-effort; an unwritable
+/// config dir just means it may show again next launch).
+fn markFirstRunDone(alloc: std.mem.Allocator) void {
+    const path = firstRunMarkerPath(alloc) orelse return;
+    defer alloc.free(path);
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch |err| {
+            log.warn("first-run marker: could not create config dir err={}", .{err});
+            return;
+        };
+    }
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = "" }) catch |err| {
+        log.warn("first-run marker: could not write err={}", .{err});
+    };
+}
+
+/// A gentle one-shot welcome pointing at the cheat-sheet key. Fire-and-forget.
+fn presentFirstRunHint(a: *AppContext) void {
+    const dialog = adw.AlertDialog.new(
+        "Welcome to Roost",
+        "Tip: press Ctrl+Shift+/ at any time to see all keyboard shortcuts.",
+    );
+    dialog.addResponse("ok", "Got it");
+    dialog.setDefaultResponse("ok");
+    dialog.setCloseResponse("ok");
+    dialog.choose(a.window.as(gtk.Widget), null, null, null);
+}
 
 /// `win.show-help` (Ctrl+Shift+/): a modal cheat-sheet of every keybinding,
 /// grouped by section. Built fresh each time; closes on Esc or the Close button.
@@ -2875,6 +2949,6 @@ fn onChooserResponse(
     } else if (std.mem.orderZ(u8, "open", resp) == .eq) {
         presentFolderPicker(a);
     } else if (std.mem.orderZ(u8, "new", resp) == .eq) {
-        beginCreateWorktree(a);
+        beginCreateWorktree(a, true);
     }
 }
