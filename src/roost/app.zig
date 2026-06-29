@@ -107,6 +107,11 @@ var active_runs: std.ArrayListUnmanaged(*ActionRun) = .empty;
 /// Count of runs not yet finished — drives the header activity spinner.
 var running_count: usize = 0;
 
+/// Whether the activity (action-output) modal is currently open. Tracked so
+/// `runAction` can auto-open it on the first run without stacking a second
+/// dialog when one is already up.
+var activity_open: bool = false;
+
 /// Our dedicated GTK application id — the single source of truth for the
 /// in-process `--class` injection below. The desktop file's StartupWMClass and
 /// the notification ThemedIcon (ipc.zig) must match this exact string.
@@ -1964,6 +1969,12 @@ fn runAction(a: *AppContext, action: actions.Action) void {
     };
     thread.detach();
     log.info("action '{s}' started: {s}", .{ action.label, action.command });
+
+    // Surface the run immediately so its progress and pass/fail verdict are
+    // visible — short actions otherwise finish entirely behind the scenes. Skip
+    // if a modal is already up (it snapshots runs at open time, so it can't show
+    // this new one, but stacking a second dialog is worse).
+    if (!activity_open) presentActivityModal(a);
 }
 
 /// Worker thread: spawn `/bin/sh -c <command>` with piped stdout+stderr, stream
@@ -2293,6 +2304,7 @@ fn presentActivityModal(a: *AppContext) void {
     dialog.setDefaultResponse("close");
     dialog.setCloseResponse("close");
     _ = adw.Dialog.signals.closed.connect(dialog.as(adw.Dialog), *Activity, onActivityClosed, act, .{});
+    activity_open = true;
     dialog.choose(a.window.as(gtk.Widget), null, null, null);
 }
 
@@ -2400,6 +2412,7 @@ fn onActivityStop(_: *gtk.Button, act: *Activity) callconv(.c) void {
 /// keep going (output accrues in their buffer; reopening reseeds a fresh view).
 fn onActivityClosed(_: *adw.Dialog, act: *Activity) callconv(.c) void {
     const ca = std.heap.c_allocator;
+    activity_open = false;
     for (act.runs.items) |ar| {
         ar.view = null;
         if (ar.done) {
