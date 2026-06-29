@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Roost app icon: a "ghost bird" — Ghostty's ghost (Roost is an additive
+       soft-fork of Ghostty) fused with a bird (it roosts): crest feathers, eyes,
+       a triangular beak, and the ghost's scalloped hem. Monochrome and
+       theme-NEUTRAL on purpose: the single fill is a plain neutral light tone
+       (#d0d0d0), NOT any palette-specific color, so it reads on every Omarchy
+       theme. scripts/install-icon.sh can re-render it in any color (e.g. the
+       active theme's accent) — it substitutes the ROOST_ICON_FILL token below.
+       The mask knocks the eyes/beak out as transparent holes (winding-proof). -->
+  <defs>
+    <mask id="cut">
+      <rect width="256" height="256" fill="black"/>
+      <!-- crest: three fanned feathers -->
+      <path d="M112,56 L98,20 L124,52 Z" fill="white"/>
+      <path d="M122,50 L128,10 L134,50 Z" fill="white"/>
+      <path d="M132,52 L158,20 L144,56 Z" fill="white"/>
+      <!-- body: domed head, sides, scalloped ghost hem -->
+      <path fill="white" d="M54,122
+        A74,74 0 0 1 202,122
+        L202,180
+        A24.67,24.67 0 0 1 152.67,180
+        A24.67,24.67 0 0 1 103.33,180
+        A24.67,24.67 0 0 1 54,180
+        Z"/>
+      <!-- eyes (holes) -->
+      <ellipse cx="104" cy="122" rx="10.5" ry="13.5" fill="black"/>
+      <ellipse cx="152" cy="122" rx="10.5" ry="13.5" fill="black"/>
+      <!-- beak (hole) -->
+      <path d="M117,136 L139,136 L128,159 Z" fill="black"/>
+    </mask>
+  </defs>
+  <rect width="256" height="256" fill="#d0d0d0" mask="url(#cut)"/>
+</svg>
