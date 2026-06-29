@@ -50,10 +50,13 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Agent-aware notifications** — wire Roost into Claude Code's hooks and the
   Agent pane raises a desktop notification + a status badge when the agent
   finishes (`✓ done`) or needs you (`🔔 needs you`).
-- **Scratchpad → Agent** — select text (or just a line) in the Scratchpad and
-  `Ctrl+Enter` sends it straight to the Agent pane.
+- **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
+  `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
+  Agent pane's output back into the Scratchpad. The Scratchpad renders Markdown
+  live (Typora-style) as you type and autosaves per project.
 - **Inherits your Ghostty config** — fonts, theme, keybinds, and (on Omarchy)
-  your current theme are read from your existing `~/.config/ghostty`.
+  your current theme are read from your existing `~/.config/ghostty`. A built-in
+  **Settings** dialog (`Ctrl+,`) covers the Roost-specific options.
 
 ## Requirements
 
@@ -90,10 +93,11 @@ ln -s "$PWD/vendor/ghostty/zig-out/bin/roost" ~/.local/bin/roost
 ```
 
 Optional — install the desktop launcher (edit `Exec=` to point at your clone
-first):
+first) and the app icon:
 
 ```sh
 cp scripts/roost.desktop ~/.local/share/applications/
+scripts/install-icon.sh                 # ghost-bird icon → your hicolor theme
 ```
 
 ## Usage
@@ -114,16 +118,21 @@ always its own independent window.
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+O` | Open the project / worktree chooser (recents, worktrees, open folder, new worktree) |
+| `Ctrl+O` | Open the project / worktree chooser (recents, worktrees, open folder; **New Worktree…** opens in a new window) |
 | `Ctrl+Shift+B` | Create a git worktree from a branch name and switch the workspace into it |
 | `Ctrl+Enter` | Send the Scratchpad's selection (or current line) to the Agent pane |
+| `Ctrl+Shift+Y` | Capture the Agent pane's output into the Scratchpad |
 | `Alt+1` … `Alt+9` | Focus pane by index |
-| `Ctrl+Alt+←/→/↑/↓` | Focus pane by direction |
-| `Ctrl+Shift+R` | Split the focused pane to the right |
-| `Ctrl+Shift+D` | Split the focused pane downward |
+| `Ctrl+Alt+←/→/↑/↓` | Focus pane by direction (`hjkl` aliases too) |
+| `Ctrl+Shift+←/→/↑/↓` | Resize the focused pane |
+| `Ctrl+Shift+Alt+←/→/↑/↓` | Swap the focused pane with its neighbor |
+| `Ctrl+Shift+R` / `D` | Split the focused pane right / down |
 | `Ctrl+Shift+A` / `S` / `G` / `E` / `N` | Add an Agent / Shell / Git / Editor / Scratchpad pane |
 | `Ctrl+W` | Close the focused pane |
 | `Ctrl+Alt+R` | Reset to the default 2×2 layout |
+| `Ctrl+,` | Open Settings |
+| `Ctrl+Shift+/` | Show the keyboard cheat-sheet |
+| `Ctrl+Shift+Q` | Reload — restart into the latest build |
 | `Ctrl+Q` | Quit (saves the layout) |
 
 > Note: shifted-digit accelerators don't fire in GTK, which is why splits/roles
@@ -150,6 +159,9 @@ never break your agent.
 
 - **Terminal look & feel** is your existing Ghostty config (`~/.config/ghostty`),
   including the Omarchy theme — Roost reads it directly.
+- **Roost options** (agent command, focus-follows-mouse, scratchpad, etc.) live
+  in `~/.config/roost/config` and are editable in the **Settings** dialog
+  (`Ctrl+,`).
 - **Layouts & recents** live in `~/.config/roost/` (one layout file per project,
   keyed by path).
 - **App id** is `dev.scottzirkel.Roost` (set so Roost never collides with a real
@@ -184,16 +196,15 @@ build.sh              overlay + build
 Roost is **early but usable** — the core is complete and in daily use:
 
 - ✅ Real Ghostty panes, free-form pane tree, per-project persisted layouts
-- ✅ Git worktree create + switch, project/worktree chooser, recents
+- ✅ Git worktree create + switch (and into a new window), project/worktree chooser, recents
 - ✅ Agent command + socket IPC → desktop notifications + status badge
-- ✅ Scratchpad → Agent
+- ✅ Scratchpad ↔ Agent (send selection, capture output) with live Markdown styling
+- ✅ Settings dialog, focus-follows-mouse (with dwell), keyboard cheat-sheet, app icon
 
-Planned / known gaps:
-
-- A real app **icon** (currently falls back to a generic icon)
-- **`Ctrl+Z` in the Agent pane** suspends `claude` with no easy resume — needs an intercept
-- Scratchpad **Markdown live-preview**, and **capturing agent output** back into it
-- "New Worktree…" opening in a new window (today it switches the current one)
+The original roadmap gaps are now closed: the ghost-bird app **icon**, the Agent-pane
+**`Ctrl+Z`** remap (→ Claude Code's undo), live scratchpad **Markdown styling** and
+**capturing agent output** into it, and **"New Worktree…" opening in a new window**
+are all done. No known feature gaps remain — issues and ideas welcome.
 
 ## Contributing
 
