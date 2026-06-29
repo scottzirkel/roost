@@ -952,6 +952,9 @@ fn setupShortcuts(
     // Cross-pane: send scratchpad text to the agent (Ctrl+Return).
     addAction(map, "send-to-agent", onSendToAgent, app_ctx);
 
+    // Cross-pane: capture the Agent pane's output into the scratchpad (Ctrl+Shift+Y).
+    addAction(map, "capture-agent", onCaptureAgent, app_ctx);
+
     // Keyboard cheat-sheet (Ctrl+Shift+/).
     addAction(map, "show-help", onShowHelp, app_ctx);
 
@@ -1023,6 +1026,10 @@ fn setupShortcuts(
     setAccel(gtk_app, "app.present-chooser", "<Ctrl>o");
     setAccel(gtk_app, "win.create-worktree", "<Ctrl><Shift>b");
     setAccel(gtk_app, "win.send-to-agent", "<Ctrl>Return");
+    // Capture Agent output → scratchpad. Uppercase Y (Shift delivers the
+    // uppercase keyval); not a Ghostty default, so our window accelerator fires
+    // without needing an unbind injection.
+    setAccel(gtk_app, "win.capture-agent", "<Ctrl><Shift>Y");
     setAccel(gtk_app, "win.show-help", "<Ctrl>question");
     setAccel(gtk_app, "win.show-settings", "<Ctrl>comma");
     setAccel(gtk_app, "win.show-actions", "<Ctrl><Shift>P");
@@ -1270,6 +1277,18 @@ fn onAddScratchpad(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) call
 /// structural change, so no layout save.
 fn onSendToAgent(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.sendToAgent();
+}
+
+/// `win.capture-agent` (Ctrl+Shift+Y): snapshot the Agent pane's terminal text
+/// (full scrollback) into the scratchpad, under a heading. Surfaces a small
+/// alert when there's nothing to do (no agent pane / no scratchpad / empty).
+fn onCaptureAgent(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    switch (a.workspace.captureAgentToScratchpad()) {
+        .ok => {}, // the text is now visible in the scratchpad
+        .no_agent => errorAlert(a.window, "No agent pane", "Open an Agent pane to capture its output."),
+        .no_scratchpad => errorAlert(a.window, "No scratchpad pane", "Add a Scratchpad pane (Ctrl+Shift+N) to capture into."),
+        .empty => errorAlert(a.window, "Nothing to capture", "The Agent pane has no text yet."),
+    }
 }
 
 // --- Project directory + picker -------------------------------------------
@@ -1690,6 +1709,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+B", .text = "New branch + worktree" },
     .{ .text = "Other" },
     .{ .keys = "Ctrl+Enter", .text = "Send scratchpad selection → agent" },
+    .{ .keys = "Ctrl+Shift+Y", .text = "Capture Agent output → scratchpad" },
     .{ .keys = "Ctrl+Shift+M", .text = "Toggle focus-follows-mouse (on by default)" },
     .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
     .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build" },

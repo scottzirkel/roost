@@ -108,6 +108,15 @@ pub const TerminalPane = union(enum) {
         }
     }
 
+    /// Capture this pane's terminal text (full scrollback + screen) as an owned,
+    /// NUL-terminated string, or null if unavailable. Caller frees with
+    /// `alloc.free`. Used to snapshot an Agent pane into the scratchpad.
+    pub fn captureText(self: *TerminalPane, alloc: std.mem.Allocator) ?[:0]const u8 {
+        switch (self.*) {
+            inline else => |*b| return b.captureText(alloc),
+        }
+    }
+
     /// Re-apply the application theme/config to this pane (best-effort).
     pub fn setTheme(self: *TerminalPane) void {
         switch (self.*) {
@@ -249,6 +258,20 @@ pub const GhosttyTerminalPane = struct {
         _ = core.performBindingAction(.{ .text = bytes }) catch |err| {
             log.warn("sendInput: performBindingAction failed err={}", .{err});
         };
+    }
+
+    /// Capture this pane's terminal text (full scrollback + screen) as an owned,
+    /// NUL-terminated string. Mirrors Ghostty's own `dumpText` read path: take
+    /// the renderer mutex, select all non-whitespace content, stringify it.
+    /// Null if the surface isn't realized yet or the screen is empty. Caller
+    /// frees with `alloc.free`.
+    fn captureText(self: *GhosttyTerminalPane, alloc: std.mem.Allocator) ?[:0]const u8 {
+        const core = self.surface.core() orelse return null;
+        core.renderer_state.mutex.lock();
+        defer core.renderer_state.mutex.unlock();
+        const screen = core.io.terminal.screens.active; // *Screen
+        const sel = screen.selectAll() orelse return null; // empty screen
+        return screen.selectionString(alloc, .{ .sel = sel, .trim = true }) catch return null;
     }
 
     fn setTheme(self: *GhosttyTerminalPane) void {

@@ -756,6 +756,30 @@ pub const Tree = struct {
         return preferred orelse any;
     }
 
+    /// Outcome of `captureAgentToScratchpad`, so the caller can give feedback.
+    pub const CaptureResult = enum { ok, no_agent, no_scratchpad, empty };
+
+    /// Snapshot the first Agent pane's terminal text (full scrollback + screen)
+    /// into the scratchpad, under a heading. The raw markdown is preserved (the
+    /// scratchpad styles it live and autosaves it). Returns a status so the
+    /// caller can surface "no agent pane", "no scratchpad", etc.
+    pub fn captureAgentToScratchpad(self: *Tree) CaptureResult {
+        const agent = self.firstLeafOfRole(.agent) orelse return .no_agent;
+        if (agent.leaf.pane != .terminal) return .no_agent;
+        const scratch = self.firstLeafOfRole(.scratchpad) orelse return .no_scratchpad;
+        if (scratch.leaf.pane != .scratchpad) return .no_scratchpad;
+
+        const text = agent.leaf.pane.terminal.captureText(self.alloc) orelse return .empty;
+        defer self.alloc.free(text);
+        const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+        if (trimmed.len == 0) return .empty;
+
+        const framed = std.fmt.allocPrint(self.alloc, "### Agent output\n\n{s}", .{trimmed}) catch return .empty;
+        defer self.alloc.free(framed);
+        scratch.leaf.pane.scratchpad.appendText(framed);
+        return .ok;
+    }
+
     // --- Agent status badge ----------------------------------------------
 
     /// Update the FIRST agent-role leaf's header label to reflect `status`.

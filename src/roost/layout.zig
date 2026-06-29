@@ -218,6 +218,12 @@ pub const Workspace = struct {
         return self.t.routeToRole(role, bytes);
     }
 
+    /// Snapshot the Agent pane's terminal text into the scratchpad. Returns a
+    /// status the caller can surface (ok / no agent / no scratchpad / empty).
+    pub fn captureAgentToScratchpad(self: *Workspace) tree.Tree.CaptureResult {
+        return self.t.captureAgentToScratchpad();
+    }
+
     /// Recompute the active-pane highlight from the window's live GTK focus.
     /// Driven by the window `notify::focus-widget` handler (mouse + keyboard +
     /// programmatic focus all route through it). No-op if no window is attached.
