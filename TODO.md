@@ -38,7 +38,7 @@ Roost is a GTK4 "agent command center" for Omarchy/Hyprland — a focused clone 
 - gio notifications are silent by design (no system audio).
 
 ## Remaining work
-The product core (Phases 0–3d) is complete & committed; the Roost rename is done. What's left is the deferred items + polish below, then the repo extraction.
+The product core (Phases 0–3d), the Roost rename, and the repo extraction are all complete & committed, and the deferred items + 3a polish below are all done. **No feature work remains.** Only optional nice-to-haves are open: FFM-toggle on-screen feedback (toast/badge) on the focus-follows-mouse entry; a live taskbar/Alt-Tab icon confirm; and a live-display app-id confirm (`hyprctl clients`). The sections below are kept as a changelog.
 
 ### ▶ Fresh backlog (2026-06-26 — ALL 5 DONE, build+gate green, live-verified by screenshot; committed `36383d2`)
 All five items below were implemented in one pass and verified on a live display (launched a dedicated instance on its own workspace, screenshotted, closed only that instance). Build clean, gate = only `build.zig`. Committed `36383d2`. Config round-trips the two new keys (`show-pane-titles`, plus the default-layout file is separate JSON).
