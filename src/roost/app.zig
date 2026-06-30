@@ -1618,6 +1618,14 @@ fn onWorktreeResponse(
         return;
     }
 
+    // addWorktree returns null on success — but OOM in its failure-message alloc
+    // ALSO returns null, so confirm the worktree dir really exists before we
+    // switch into it (a missing dest means creation actually failed).
+    std.fs.cwd().access(dest, .{}) catch {
+        errorAlert(a.window, "Could not create worktree", "The worktree could not be created.");
+        return;
+    };
+
     // Chooser "New Worktree…" opens the fresh worktree detached (this window
     // stays put); Ctrl+Shift+B switches this window into it.
     if (req.new_window) {

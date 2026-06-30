@@ -75,6 +75,8 @@ fn shortHead(alloc: Allocator, dir: []const u8) ?[]u8 {
 ///
 /// Returns null on success. On failure, returns an owned, human-readable error
 /// message (git's stderr, trimmed) suitable for a dialog; the caller frees it.
+/// CAVEAT: OOM while building the failure message also yields null, so a caller
+/// that acts on "success" should confirm `dest` actually exists.
 pub fn addWorktree(
     alloc: Allocator,
     repo_root: []const u8,
