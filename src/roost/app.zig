@@ -508,7 +508,10 @@ fn resolveAgentCmd(alloc: std.mem.Allocator, configured: [:0]const u8) ?[:0]cons
     const cmd: [:0]const u8 = std.posix.getenv("ROOST_AGENT") orelse configured;
     if (cmd.len == 0) return null;
     if (!commandOnPath(cmd)) return null;
-    return alloc.dupeZ(u8, cmd) catch cmd;
+    // On OOM fall back to the shell (the null contract) rather than returning the
+    // borrowed `configured` string: it's owned by the live Config and a later
+    // Settings agent edit frees it, which would dangle this snapshot.
+    return alloc.dupeZ(u8, cmd) catch null;
 }
 
 /// Resolve the project to open on launch.
@@ -2026,6 +2029,9 @@ fn actionWorker(ar: *ActionRun) void {
     streamChild(ca, ar, &child);
 
     const term = child.wait() catch std.process.Child.Term{ .Exited = 1 };
+    // The child is reaped; clear the pid so a late Stop click / quit can't
+    // kill(-pid) a PID-recycled process group (stopRun's `pid > 0` guard skips).
+    @atomicStore(i32, &ar.pid, 0, .release);
     ar.code = switch (term) {
         .Exited => |c| c,
         else => 1,
