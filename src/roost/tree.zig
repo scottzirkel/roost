@@ -1680,7 +1680,10 @@ fn labeledBox(role: Role, content: *gtk.Widget) struct { box: *gtk.Box, label: *
 /// GTK allocates it a real size. Mirrors layout.zig's centerOnAllocate but with
 /// an arbitrary ratio (used to restore persisted proportions / default 0.5).
 fn applyRatioOnAllocate(paned: *gtk.Paned, ratio: f64) void {
-    // Stash the desired ratio as a small heap value the handler reads + frees.
+    // Stash the desired ratio as a small heap value the handler reads. It lives
+    // as long as the signal connection; `freeRatioSlot` (the closure's
+    // destroy-notify) frees it when the paned is finalized, so the slot doesn't
+    // leak for the session.
     const slot = glib.ext.create(f64);
     slot.* = ratio;
     _ = gobject.Object.signals.notify.connect(
@@ -1688,8 +1691,14 @@ fn applyRatioOnAllocate(paned: *gtk.Paned, ratio: f64) void {
         *f64,
         onMaxPositionRatio,
         slot,
-        .{ .detail = "max-position" },
+        .{ .detail = "max-position", .destroyData = freeRatioSlot },
     );
+}
+
+/// Closure destroy-notify for `applyRatioOnAllocate`'s ratio slot: GObject calls
+/// this when the paned's signal closure is finalized (i.e. the paned is gone).
+fn freeRatioSlot(ratio_ptr: *f64) callconv(.c) void {
+    glib.ext.destroy(ratio_ptr);
 }
 
 fn onMaxPositionRatio(paned: *gtk.Paned, _: *gobject.ParamSpec, ratio_ptr: *f64) callconv(.c) void {
