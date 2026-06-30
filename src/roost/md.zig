@@ -123,6 +123,11 @@ fn parseLine(alloc: Allocator, spans: *std.ArrayListUnmanaged(Span), cols: []con
 /// recognized run emits a content span plus `.marker` spans over its delimiters.
 /// An unmatched delimiter is treated as a literal character. Code is matched
 /// first so `*`/`_` inside `` `code` `` are left alone.
+///
+/// Emphasis (`*`/`_`) obeys a practical subset of CommonMark "flanking" so prose
+/// like `5 * 6 * 7` and identifiers like `my_var_name` don't get mangled into
+/// italics: an opening run must be immediately followed by a non-space char and a
+/// closing run immediately preceded by one, and `_` may not sit inside a word.
 fn scanInline(
     alloc: Allocator,
     spans: *std.ArrayListUnmanaged(Span),
@@ -141,16 +146,20 @@ fn scanInline(
                 continue;
             }
         } else if (c == '*' and i + 1 < n and cols[i + 1] == '*') {
-            if (findDouble(cols, i + 2, n, '*')) |j| {
-                try emitDelimited(alloc, spans, base, i, i + 2, j, j + 2, .bold);
-                i = j + 2;
-                continue;
+            if (canOpen(cols, i, 2, n)) {
+                if (findEmphClose(cols, i + 2, n, '*', 2)) |j| {
+                    try emitDelimited(alloc, spans, base, i, i + 2, j, j + 2, .bold);
+                    i = j + 2;
+                    continue;
+                }
             }
         } else if (c == '*' or c == '_') {
-            if (findChar(cols, i + 1, n, c)) |j| {
-                try emitDelimited(alloc, spans, base, i, i + 1, j, j + 1, .italic);
-                i = j + 1;
-                continue;
+            if (canOpen(cols, i, 1, n)) {
+                if (findEmphClose(cols, i + 1, n, c, 1)) |j| {
+                    try emitDelimited(alloc, spans, base, i, i + 1, j, j + 1, .italic);
+                    i = j + 1;
+                    continue;
+                }
             }
         }
         i += 1;
@@ -183,12 +192,48 @@ fn findChar(cols: []const u21, from: u32, n: u32, ch: u21) ?u32 {
     return null;
 }
 
-/// Find the next `ch ch` pair (e.g. `**`) at or after `from`, returning the
-/// index of its first character.
-fn findDouble(cols: []const u21, from: u32, n: u32, ch: u21) ?u32 {
+fn isSpaceCp(cp: u21) bool {
+    return cp == ' ' or cp == '\t';
+}
+
+/// A "word" character for the intraword-`_` rule: ASCII alphanumerics plus any
+/// non-ASCII codepoint (assumed to be a letter). Keeps `a_b` / `my_var_name`
+/// literal while letting `_x_` and `(_x_)` still emphasize.
+fn isWordCp(cp: u21) bool {
+    return (cp >= '0' and cp <= '9') or
+        (cp >= 'a' and cp <= 'z') or
+        (cp >= 'A' and cp <= 'Z') or
+        cp >= 0x80;
+}
+
+/// Can a `run`-long delimiter run starting at `i` OPEN emphasis? It must be
+/// left-flanking (immediately followed by a non-space char), and `_` may not
+/// open inside a word (preceded by a word char).
+fn canOpen(cols: []const u21, i: u32, run: u32, n: u32) bool {
+    const after = i + run;
+    if (after >= n or isSpaceCp(cols[after])) return false;
+    if (cols[i] == '_' and i > 0 and isWordCp(cols[i - 1])) return false;
+    return true;
+}
+
+/// Can a `run`-long delimiter run starting at `j` CLOSE emphasis? It must be
+/// right-flanking (immediately preceded by a non-space char), and `_` may not
+/// close inside a word (followed by a word char).
+fn canClose(cols: []const u21, j: u32, run: u32, n: u32) bool {
+    if (j == 0 or isSpaceCp(cols[j - 1])) return false;
+    const after = j + run;
+    if (cols[j] == '_' and after < n and isWordCp(cols[after])) return false;
+    return true;
+}
+
+/// Find the next `run`-long run of `ch` at or after `from` that is a valid
+/// closing delimiter, returning the index of its first character.
+fn findEmphClose(cols: []const u21, from: u32, n: u32, ch: u21, run: u32) ?u32 {
     var i = from;
-    while (i + 1 < n) : (i += 1) {
-        if (cols[i] == ch and cols[i + 1] == ch) return i;
+    while (i + run <= n) : (i += 1) {
+        if (cols[i] != ch) continue;
+        if (run == 2 and cols[i + 1] != ch) continue;
+        if (canClose(cols, i, run, n)) return i;
     }
     return null;
 }
@@ -267,6 +312,35 @@ test "unmatched delimiter is literal" {
     const spans = try parse(testing.allocator, "a*b");
     defer testing.allocator.free(spans);
     try testing.expectEqual(@as(usize, 0), spans.len);
+}
+
+test "space-flanked stars are not italic (multiplication)" {
+    const spans = try parse(testing.allocator, "5 * 6 * 7");
+    defer testing.allocator.free(spans);
+    try testing.expectEqual(@as(usize, 0), spans.len);
+}
+
+test "space-flanked stars are not bold" {
+    const spans = try parse(testing.allocator, "5 ** 6 ** 7");
+    defer testing.allocator.free(spans);
+    try testing.expectEqual(@as(usize, 0), spans.len);
+}
+
+test "intraword underscores are not italic (identifier)" {
+    const spans = try parse(testing.allocator, "my_var_name");
+    defer testing.allocator.free(spans);
+    try testing.expectEqual(@as(usize, 0), spans.len);
+}
+
+test "italic spans an internal space-flanked star" {
+    // Opener flanks `a`, the inner `*` is space-flanked (not a closer), so the
+    // run closes at the final `*` — content is "a * b" (CommonMark behavior).
+    const spans = try parse(testing.allocator, "*a * b*");
+    defer testing.allocator.free(spans);
+    try expectSpan(spans, 0, 0, 1, .marker); // opening "*"
+    try expectSpan(spans, 1, 1, 6, .italic); // "a * b"
+    try expectSpan(spans, 2, 6, 7, .marker); // closing "*"
+    try testing.expectEqual(@as(usize, 3), spans.len);
 }
 
 test "fenced code line left unstyled" {
