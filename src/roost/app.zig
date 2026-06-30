@@ -107,10 +107,11 @@ var active_runs: std.ArrayListUnmanaged(*ActionRun) = .empty;
 /// Count of runs not yet finished — drives the header activity spinner.
 var running_count: usize = 0;
 
-/// Whether the activity (action-output) modal is currently open. Tracked so
-/// `runAction` can auto-open it on the first run without stacking a second
-/// dialog when one is already up.
-var activity_open: bool = false;
+/// The single open Action Output modal, or null when none is showing. Holding
+/// the modal (not just a bool) lets a run that starts later append its own row
+/// live, and guarantees only one modal exists — so two never share, then free,
+/// the same `*ActionRun`.
+var activity_modal: ?*Activity = null;
 
 /// Our dedicated GTK application id — the single source of truth for the
 /// in-process `--class` injection below. The desktop file's StartupWMClass and
@@ -1923,6 +1924,28 @@ const ActionRun = struct {
 /// A streamed output chunk marshaled from the worker to the main thread.
 const ChunkMsg = struct { run: *ActionRun, bytes: []u8 };
 
+/// True when output sent to `route` lands in a visible pane (agent/shell/
+/// scratchpad) — i.e. the user already sees it without opening a modal.
+fn routeShowsInPane(route: actions.Route) bool {
+    return switch (route) {
+        .agent, .shell, .scratchpad => true,
+        .notify, .none => false,
+    };
+}
+
+/// Whether `runAction` should auto-open the Action Output modal for `action`.
+/// Only for output that would otherwise be an easily-missed transient
+/// notification: a pane route already has a visible home, and `.none` is an
+/// explicit "discard" (the user wants silence), so neither should steal focus.
+/// We can't know the exit code yet, so consider both the success and failure
+/// outcomes.
+fn actionWantsModal(action: actions.Action) bool {
+    const on_pass = action.routeFor(0);
+    const on_fail = action.routeFor(1);
+    if (routeShowsInPane(on_pass) or routeShowsInPane(on_fail)) return false;
+    return on_pass == .notify or on_fail == .notify;
+}
+
 /// Kick off `action`: snapshot it into a libc-allocated `ActionRun`, register it
 /// (for the activity indicator + modal), and run the command on a DETACHED
 /// thread. The worker streams output back so the UI never blocks (a `pub crawl`
@@ -1964,17 +1987,31 @@ fn runAction(a: *AppContext, action: actions.Action) void {
         log.warn("action '{s}': could not spawn worker err={}", .{ action.label, err });
         ar.failed_to_run = true;
         ar.code = 127;
+        // Surface the failure BEFORE finalizeRun frees the (unviewed) run: a
+        // headless action that can't even launch should still show its verdict
+        // instead of failing silently behind a transient notification.
+        if (activity_modal) |act| {
+            addActivityRun(act, ar);
+        } else if (actionWantsModal(action)) {
+            openActivityModal(a, &.{ar});
+        }
         finalizeRun(ar); // route the failure + tidy the indicator
         return;
     };
     thread.detach();
     log.info("action '{s}' started: {s}", .{ action.label, action.command });
 
-    // Surface the run immediately so its progress and pass/fail verdict are
-    // visible — short actions otherwise finish entirely behind the scenes. Skip
-    // if a modal is already up (it snapshots runs at open time, so it can't show
-    // this new one, but stacking a second dialog is worse).
-    if (!activity_open) presentActivityModal(a);
+    // Surface the run so its progress and pass/fail verdict are visible — short
+    // actions otherwise finish entirely behind the scenes. If a modal is already
+    // up, append this run's row to it (live). Otherwise open one scoped to JUST
+    // this run, and only for output with no visible home (notify/none) — pane-
+    // routed output already shows in its pane, and scoping to `ar` avoids
+    // re-surfacing runs the user already dismissed.
+    if (activity_modal) |act| {
+        addActivityRun(act, ar);
+    } else if (actionWantsModal(action)) {
+        openActivityModal(a, &.{ar});
+    }
 }
 
 /// Worker thread: spawn `/bin/sh -c <command>` with piped stdout+stderr, stream
@@ -2217,6 +2254,9 @@ fn updateActivityIndicator(a: *AppContext) void {
 const Activity = struct {
     a: *AppContext,
     runs: std.ArrayListUnmanaged(*ActionRun),
+    /// Container the per-run output rows live in. Kept so runs that start while
+    /// the modal is open can append their own row (see `addActivityRun`).
+    runs_box: *gtk.Box,
     /// The "send output" target picker, and the open panes it indexes (tree
     /// order; same indices). Captured when the modal opens; freed on close.
     dropdown: ?*gtk.DropDown = null,
@@ -2224,14 +2264,55 @@ const Activity = struct {
 };
 
 fn onActivityClicked(_: *gtk.Button, a: *AppContext) callconv(.c) void {
-    presentActivityModal(a);
+    // Manual open: show everything currently active. No-op while a modal is up.
+    if (activity_modal == null) openActivityModal(a, active_runs.items);
 }
 
-/// Open a wide modal showing each currently-active run's output live (read-only),
-/// with Copy + a "Send output" button and a pane picker. Snapshots the runs
-/// active at open time.
-fn presentActivityModal(a: *AppContext) void {
-    if (active_runs.items.len == 0) {
+/// Append one run's labeled, scrolling output view to the open modal and wire it
+/// as the run's live-append target. Used both when the modal opens and when a new
+/// run starts while it's already up.
+fn addActivityRun(act: *Activity, ar: *ActionRun) void {
+    const ca = std.heap.c_allocator;
+    act.runs.append(ca, ar) catch return;
+
+    const lbl = gtk.Label.new(null);
+    var nb: [256]u8 = undefined;
+    lbl.setMarkup(std.fmt.bufPrintZ(&nb, "<b>{s}</b>", .{ar.label}) catch "<b>action</b>");
+    lbl.setXalign(0.0);
+    lbl.as(gtk.Widget).setHalign(.start);
+    act.runs_box.append(lbl.as(gtk.Widget));
+
+    const view = gtk.TextView.new();
+    view.setEditable(0);
+    view.setCursorVisible(0);
+    view.setMonospace(1);
+    view.setWrapMode(.word_char);
+    const buffer = view.getBuffer();
+    if (ar.output.items.len > 0) {
+        if (act.a.alloc.dupeZ(u8, ar.output.items)) |z| {
+            defer act.a.alloc.free(z);
+            buffer.setText(z, @intCast(ar.output.items.len));
+        } else |_| {}
+    }
+    ar.view = view; // live-append target; cleared on modal close
+    var end: gtk.TextIter = undefined;
+    buffer.getEndIter(&end);
+    _ = view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+
+    const scroller = gtk.ScrolledWindow.new();
+    scroller.setPolicy(.automatic, .automatic);
+    scroller.as(gtk.Widget).setVexpand(1);
+    scroller.setChild(view.as(gtk.Widget));
+    act.runs_box.append(scroller.as(gtk.Widget));
+}
+
+/// Open a wide modal showing `initial_runs`' output live (read-only), with Stop +
+/// Copy + a "Send output" pane picker. Stays bound via the `activity` pointer, so
+/// runs that start later append their own row instead of being missed. No-op if a
+/// modal is already up.
+fn openActivityModal(a: *AppContext, initial_runs: []const *ActionRun) void {
+    if (activity_modal != null) return; // one modal at a time
+    if (initial_runs.len == 0) {
         const d = adw.AlertDialog.new("No actions running", "Nothing is running right now.");
         d.addResponse("close", "Close");
         d.setDefaultResponse("close");
@@ -2242,44 +2323,15 @@ fn presentActivityModal(a: *AppContext) void {
 
     const ca = std.heap.c_allocator;
     const act = ca.create(Activity) catch return;
-    act.* = .{ .a = a, .runs = .empty };
+    const runs_box = gtk.Box.new(.vertical, 8);
+    runs_box.as(gtk.Widget).setVexpand(1);
+    act.* = .{ .a = a, .runs = .empty, .runs_box = runs_box };
 
     const vbox = gtk.Box.new(.vertical, 8);
     vbox.as(gtk.Widget).setSizeRequest(640, 460);
+    vbox.append(runs_box.as(gtk.Widget));
 
-    for (active_runs.items) |ar| {
-        act.runs.append(ca, ar) catch continue;
-
-        const lbl = gtk.Label.new(null);
-        var nb: [256]u8 = undefined;
-        lbl.setMarkup(std.fmt.bufPrintZ(&nb, "<b>{s}</b>", .{ar.label}) catch "<b>action</b>");
-        lbl.setXalign(0.0);
-        lbl.as(gtk.Widget).setHalign(.start);
-        vbox.append(lbl.as(gtk.Widget));
-
-        const view = gtk.TextView.new();
-        view.setEditable(0);
-        view.setCursorVisible(0);
-        view.setMonospace(1);
-        view.setWrapMode(.word_char);
-        const buffer = view.getBuffer();
-        if (ar.output.items.len > 0) {
-            if (a.alloc.dupeZ(u8, ar.output.items)) |z| {
-                defer a.alloc.free(z);
-                buffer.setText(z, @intCast(ar.output.items.len));
-            } else |_| {}
-        }
-        ar.view = view; // live-append target; cleared on modal close
-        var end: gtk.TextIter = undefined;
-        buffer.getEndIter(&end);
-        _ = view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
-
-        const scroller = gtk.ScrolledWindow.new();
-        scroller.setPolicy(.automatic, .automatic);
-        scroller.as(gtk.Widget).setVexpand(1);
-        scroller.setChild(view.as(gtk.Widget));
-        vbox.append(scroller.as(gtk.Widget));
-    }
+    for (initial_runs) |ar| addActivityRun(act, ar);
 
     // Stop (destructive) + Copy + a "Send output" button paired with a dropdown
     // that lists the currently-open panes (default: scratchpad).
@@ -2304,7 +2356,7 @@ fn presentActivityModal(a: *AppContext) void {
     dialog.setDefaultResponse("close");
     dialog.setCloseResponse("close");
     _ = adw.Dialog.signals.closed.connect(dialog.as(adw.Dialog), *Activity, onActivityClosed, act, .{});
-    activity_open = true;
+    activity_modal = act;
     dialog.choose(a.window.as(gtk.Widget), null, null, null);
 }
 
@@ -2412,7 +2464,7 @@ fn onActivityStop(_: *gtk.Button, act: *Activity) callconv(.c) void {
 /// keep going (output accrues in their buffer; reopening reseeds a fresh view).
 fn onActivityClosed(_: *adw.Dialog, act: *Activity) callconv(.c) void {
     const ca = std.heap.c_allocator;
-    activity_open = false;
+    activity_modal = null;
     for (act.runs.items) |ar| {
         ar.view = null;
         if (ar.done) {
