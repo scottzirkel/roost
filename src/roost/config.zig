@@ -19,8 +19,12 @@ pub const Config = struct {
     alloc: Allocator,
 
     /// The agent program the Agent pane runs (default `claude`). `$ROOST_AGENT`
-    /// still overrides this at launch. Owned, NUL-terminated (resolved at load).
+    /// still overrides this at launch. NUL-terminated. The default is a static
+    /// literal (not heap-owned); once replaced from the file or Settings it's an
+    /// owned dup — `agent_owned` tracks which, so `deinit`/`setAgent` only free
+    /// the owned form (freeing the literal would be UB).
     agent: [:0]const u8 = "claude",
+    agent_owned: bool = false,
     /// Focus a pane when the pointer enters it (Hyprland-style). Default on;
     /// the Ctrl+Shift+M toggle / header button / Settings switch all persist here.
     focus_follows_mouse: bool = true,
@@ -47,10 +51,10 @@ pub const Config = struct {
     /// fails: a missing/unreadable file yields the defaults. The returned Config
     /// owns its heap strings and must be `deinit`'d.
     pub fn load(alloc: Allocator) Config {
-        var cfg: Config = .{
-            .alloc = alloc,
-            .agent = alloc.dupeZ(u8, "claude") catch "claude",
-        };
+        // `agent` defaults to the static literal (agent_owned = false); no eager
+        // dupe, so there's no OOM path that could store an unowned literal into an
+        // "owned" field. `parse`/`setAgent` replace it with an owned dup if set.
+        var cfg: Config = .{ .alloc = alloc };
 
         const path = configPath(alloc) catch return cfg;
         defer alloc.free(path);
@@ -71,7 +75,7 @@ pub const Config = struct {
     }
 
     pub fn deinit(self: *Config) void {
-        self.alloc.free(self.agent);
+        if (self.agent_owned) self.alloc.free(self.agent);
         if (self.scratchpad_override) |o| self.alloc.free(o);
         if (self.scratchpad_font_family) |f| self.alloc.free(f);
         self.* = undefined;
@@ -93,8 +97,9 @@ pub const Config = struct {
         const trimmed = std.mem.trim(u8, new_agent, " \t");
         if (trimmed.len == 0) return;
         const dup = self.alloc.dupeZ(u8, trimmed) catch return;
-        self.alloc.free(self.agent);
+        if (self.agent_owned) self.alloc.free(self.agent);
         self.agent = dup;
+        self.agent_owned = true;
     }
 
     /// Set (or clear) the explicit scratchpad override. An empty value clears it
@@ -242,15 +247,21 @@ fn parseBool(v: []const u8) ?bool {
 /// `~/` to $HOME, leave already-absolute paths as-is, and make relative paths
 /// absolute against the cwd. Returns null on OOM.
 fn resolvePath(alloc: Allocator, path: []const u8) ?[]const u8 {
+    // Expand a leading `~/`. With $HOME unset there's no shell to do it, so treat
+    // the remainder as cwd-relative rather than duping the literal `~/…` (which
+    // would be used verbatim as a real path → a directory literally named "~").
+    var rel = path;
     if (std.mem.startsWith(u8, path, "~/")) {
-        const home = std.posix.getenv("HOME") orelse return alloc.dupe(u8, path) catch null;
-        return std.fs.path.join(alloc, &.{ home, path[2..] }) catch null;
+        if (std.posix.getenv("HOME")) |home| {
+            return std.fs.path.join(alloc, &.{ home, path[2..] }) catch null;
+        }
+        rel = path[2..];
     }
-    if (std.fs.path.isAbsolute(path)) return alloc.dupe(u8, path) catch null;
+    if (std.fs.path.isAbsolute(rel)) return alloc.dupe(u8, rel) catch null;
     // Relative: make absolute against the cwd (fall back to the raw path).
-    const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch return alloc.dupe(u8, path) catch null;
+    const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch return alloc.dupe(u8, rel) catch null;
     defer alloc.free(cwd);
-    return std.fs.path.join(alloc, &.{ cwd, path }) catch alloc.dupe(u8, path) catch null;
+    return std.fs.path.join(alloc, &.{ cwd, rel }) catch alloc.dupe(u8, rel) catch null;
 }
 
 /// `<xdg-config>/roost/config`. Caller frees.
