@@ -909,6 +909,16 @@ pub const Tree = struct {
         defer obj.unref();
         const slot = self.detach(leaf);
 
+        // If makeSplit's create(Node) OOMs after the detach, restore the focused
+        // leaf into its slot BEFORE the `defer obj.unref()` above drops our held
+        // ref (otherwise that unref is its last → finalize → latent UAF), and
+        // tear down the orphaned, never-parented new leaf. This errdefer is
+        // declared after that defer, so it runs first.
+        errdefer {
+            self.attach(slot, leaf);
+            self.destroyFloating(new_leaf);
+        }
+
         // New paned: focused leaf (start) over/beside new leaf (end).
         const new_split = try self.makeSplit(orientation, leaf, new_leaf, 0.5);
 
@@ -950,6 +960,15 @@ pub const Tree = struct {
         _ = obj.ref();
         defer obj.unref();
         const slot = self.detach(group);
+
+        // If makeSplit's create(Node) OOMs after the detach, restore the group
+        // subtree into its slot before our held ref drops (else it finalizes →
+        // UAF), and tear down the orphaned, never-parented new leaf. Declared
+        // after `defer obj.unref()` so it runs first.
+        errdefer {
+            self.attach(slot, group);
+            self.destroyFloating(new_leaf);
+        }
 
         // New paned: the existing group (start) beside/over the new leaf (end).
         const new_split = try self.makeSplit(orientation, group, new_leaf, 0.5);
