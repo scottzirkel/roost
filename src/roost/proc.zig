@@ -41,6 +41,10 @@ pub fn run(alloc: Allocator, argv: []const []const u8, cwd: ?[]const u8) !Output
     errdefer stderr.deinit(alloc);
 
     try child.spawn();
+    // Reap the child on any failure between here and wait(): collectOutput can
+    // error (StreamTooLong on >1MiB, or a pipe read failure) and would otherwise
+    // leak the child's two pipe fds + a zombie. Mirrors std's own Child.run.
+    errdefer _ = child.kill() catch {};
     // collectOutput must precede wait(): it drains the pipes the child writes.
     try child.collectOutput(alloc, &stdout, &stderr, 1024 * 1024);
     const term = try child.wait();

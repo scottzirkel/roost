@@ -2116,8 +2116,14 @@ fn appendToTextView(view: *gtk.TextView, bytes: []const u8) void {
 fn onActionFinished(data: ?*anyopaque) callconv(.c) c_int {
     const ar: *ActionRun = @ptrCast(@alignCast(data orelse return 0));
     if (!actions_alive) {
-        removeActiveRun(ar);
-        freeActionRun(ar);
+        // Mirror finalizeRun's ownership rule even on the shutdown path: a run
+        // still held by an open Action Output modal must be freed by
+        // onActivityClosed, not here, or the two race to double-free it.
+        ar.done = true;
+        if (ar.view == null) {
+            removeActiveRun(ar);
+            freeActionRun(ar);
+        }
         return 0;
     }
     finalizeRun(ar);
@@ -2372,21 +2378,27 @@ fn appendActivityButton(
 }
 
 /// Concatenate the shown runs' output (labeled when there's more than one).
-/// Owned by `alloc`.
+/// Owned by `alloc`; null on OOM. Wraps the `!`-returning builder so a real
+/// `errdefer` frees the partial buffer (an `errdefer` in a `?`-returning fn that
+/// signals failure with `return null` never fires, leaking the buffer).
 fn activityText(act: *Activity, alloc: std.mem.Allocator) ?[]u8 {
+    return buildActivityText(act, alloc) catch null;
+}
+
+fn buildActivityText(act: *Activity, alloc: std.mem.Allocator) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     const multi = act.runs.items.len > 1;
     for (act.runs.items) |ar| {
         if (multi) {
-            buf.appendSlice(alloc, "=== ") catch return null;
-            buf.appendSlice(alloc, ar.label) catch return null;
-            buf.appendSlice(alloc, " ===\n") catch return null;
+            try buf.appendSlice(alloc, "=== ");
+            try buf.appendSlice(alloc, ar.label);
+            try buf.appendSlice(alloc, " ===\n");
         }
-        buf.appendSlice(alloc, ar.output.items) catch return null;
-        if (multi) buf.appendSlice(alloc, "\n") catch return null;
+        try buf.appendSlice(alloc, ar.output.items);
+        if (multi) try buf.appendSlice(alloc, "\n");
     }
-    return buf.toOwnedSlice(alloc) catch null;
+    return buf.toOwnedSlice(alloc);
 }
 
 fn onActivityCopy(btn: *gtk.Button, act: *Activity) callconv(.c) void {
@@ -2413,6 +2425,10 @@ fn buildPanePicker(ca: std.mem.Allocator, act: *Activity) ?*gtk.DropDown {
     // NULL-terminated array of label C-strings for gtk_drop_down_new_from_strings
     // (GTK copies them into its own model, so we free ours right after).
     const cstrs = ca.allocSentinel(?[*:0]const u8, panes.len, null) catch return null;
+    // allocSentinel only sets the trailing sentinel; the body is undefined. Null
+    // it so the cleanup below skips not-yet-filled slots if a `catch return null`
+    // in the fill loop bails early (otherwise it would free garbage pointers).
+    @memset(cstrs[0..panes.len], null);
     defer {
         for (cstrs[0..panes.len]) |p| if (p) |s| ca.free(std.mem.span(s));
         ca.free(cstrs);

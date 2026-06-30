@@ -64,12 +64,13 @@ const Root = struct { actions: []Action = &.{} };
 /// (free with `freeActions`).
 pub fn load(alloc: Allocator, config_dir: ?[]const u8, project_path: []const u8) []Action {
     const global = readFromDir(alloc, config_dir, "actions.json");
+    defer freeActions(alloc, global);
     const repo = readFromDir(alloc, if (project_path.len > 0) project_path else null, ".roost" ++ std.fs.path.sep_str ++ "actions.json");
-    return mergeOwned(alloc, global, repo) catch {
-        freeActions(alloc, global);
-        freeActions(alloc, repo);
-        return &.{};
-    };
+    defer freeActions(alloc, repo);
+    // `load` owns `global`/`repo` cleanup (the defers above) on every path;
+    // `merge` deep-copies into an independently-owned result, so there is no
+    // shared ownership to double-free if merge errors mid-way.
+    return merge(alloc, global, repo) catch &.{};
 }
 
 /// Read `<dir>/<rel>` and parse it; any error (no dir, missing file, bad JSON)
@@ -112,27 +113,24 @@ pub fn parse(alloc: Allocator, bytes: []const u8) ![]Action {
     return list.toOwnedSlice(alloc);
 }
 
-/// Merge `global` and `repo`, TAKING OWNERSHIP of both: each `Action` struct is
-/// moved into the result or freed (when a repo entry overrides a global one by
-/// label). The input array shells are freed here; the caller frees the result
-/// via `freeActions`.
-fn mergeOwned(alloc: Allocator, global: []Action, repo: []Action) ![]Action {
-    defer alloc.free(global);
-    defer alloc.free(repo);
-
+/// Merge `global` and `repo` into a fresh owned list: repo entries override a
+/// global entry of the same label, then any new repo entries append. This
+/// DEEP-COPIES the kept entries — it does NOT take ownership of the inputs (the
+/// caller still owns and frees `global`/`repo`). Returned list owned by `alloc`
+/// (free with `freeActions`); on error the partial result is freed here.
+fn merge(alloc: Allocator, global: []Action, repo: []Action) ![]Action {
     var list: std.ArrayListUnmanaged(Action) = .empty;
-    errdefer list.deinit(alloc); // moved-in structs are owned by the returned slice on success
+    errdefer {
+        for (list.items) |a| freeAction(alloc, a);
+        list.deinit(alloc);
+    }
 
     // Global entries, unless a repo entry overrides the same label.
     for (global) |g| {
-        if (hasLabel(repo, g.label)) {
-            freeAction(alloc, g); // dropped — repo wins
-        } else {
-            try list.append(alloc, g); // move ownership
-        }
+        if (!hasLabel(repo, g.label)) try list.append(alloc, try dupAction(alloc, g));
     }
     // All repo entries append (and win on conflicts, handled above).
-    for (repo) |r| try list.append(alloc, r);
+    for (repo) |r| try list.append(alloc, try dupAction(alloc, r));
 
     return list.toOwnedSlice(alloc);
 }
@@ -227,13 +225,15 @@ test "merge: per-repo overrides global by label, new ones append" {
         \\  { "label": "lint",  "command": "global-lint" }
         \\] }
     );
+    defer freeActions(alloc, global);
     const repo = try parse(alloc,
         \\{ "actions": [
         \\  { "label": "tests", "command": "repo-tests", "route": "agent" },
         \\  { "label": "deploy", "command": "repo-deploy" }
         \\] }
     );
-    const merged = try mergeOwned(alloc, global, repo);
+    defer freeActions(alloc, repo);
+    const merged = try merge(alloc, global, repo);
     defer freeActions(alloc, merged);
 
     // lint (global only), tests (repo wins), deploy (repo only).

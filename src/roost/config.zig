@@ -212,7 +212,14 @@ pub const Config = struct {
             try w.writeAll("scratchpad-font-size = \n");
         }
 
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = buf.items });
+        // Write atomically (temp + rename) so a torn write — crash, power loss,
+        // or ENOSPC mid-write — can't truncate the live config and silently
+        // revert every setting to defaults on the next launch.
+        const tmp = try std.fmt.allocPrint(self.alloc, "{s}.tmp", .{path});
+        defer self.alloc.free(tmp);
+        errdefer std.fs.cwd().deleteFile(tmp) catch {};
+        try std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = buf.items });
+        try std.fs.cwd().rename(tmp, path);
         log.info("saved config ({d} bytes)", .{buf.items.len});
     }
 };

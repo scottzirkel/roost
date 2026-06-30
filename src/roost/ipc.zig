@@ -157,38 +157,56 @@ pub const Server = struct {
         self.* = undefined;
     }
 
-    /// `incoming` signal handler. Reads one short message off the connection,
-    /// parses it, reacts, and returns TRUE (handled). Per the
-    /// gio.SocketService contract, returning TRUE stops further emission for
-    /// this connection; the connection is dropped when our last ref goes away
-    /// at the end of this callback.
+    /// Heap context for an in-flight async read: keeps the connection alive and
+    /// owns the read buffer until the read completes off the main loop.
+    /// align(8): the read binding wants `*[*]u8`, so the buffer must be
+    /// pointer-aligned (the value we pass IS C's buffer address — see below).
+    const ReadCtx = struct {
+        server: *Server,
+        connection: *gio.SocketConnection,
+        buf: [1024]u8 align(8),
+    };
+
+    /// `incoming` signal handler. Starts an ASYNCHRONOUS read of one short
+    /// message and returns TRUE immediately. A synchronous read here would block
+    /// the GTK main loop until the client writes — so a process that connects to
+    /// ROOST_SOCK (exported into every pane) but stalls before writing could
+    /// freeze the whole UI. The read is serviced off the loop in
+    /// `onReadComplete`, which drops the connection.
     fn onIncoming(
         _: *gio.SocketService,
         connection: *gio.SocketConnection,
         _: ?*gobject.Object,
         self: *Server,
     ) callconv(.c) c_int {
-        // align(8): the read() binding wants `*[*]u8` (pointer alignment), so
-        // the buffer we @ptrCast to it must be pointer-aligned.
-        var buf: [1024]u8 align(8) = undefined;
+        const ctx = self.alloc.create(ReadCtx) catch return @intFromBool(true);
+        ctx.* = .{ .server = self, .connection = connection, .buf = undefined };
+        // Keep the connection alive across the async read: the SocketService
+        // drops its ref once we return TRUE. Released in onReadComplete.
+        _ = connection.as(gobject.Object).ref();
         const istream = connection.as(gio.IOStream).getInputStream();
-
-        var gerr: ?*glib.Error = null;
-        // The zig-gobject binding types g_input_stream_read's `void* buffer` as
-        // `*[*]u8`. At the ABI level the pointer VALUE we pass IS C's buffer
-        // address, so we hand it a `*[*]u8` whose value is &buf — i.e.
-        // @ptrCast(&buf). (The original `&buf_ptr` pointed at a pointer variable,
-        // so the read landed there and left `buf` uninitialized → garbage.)
-        const n = istream.read(@ptrCast(&buf), buf.len, null, &gerr);
-        defer if (gerr) |e| e.free();
-        if (n <= 0) {
-            // EOF or error: nothing usable. Either way we're done with it.
-            return @intFromBool(true);
-        }
-
-        const msg = std.mem.trim(u8, buf[0..@intCast(n)], " \t\r\n");
-        self.handle(msg);
+        // The binding types g_input_stream_read_async's `void* buffer` as
+        // `*[*]u8`; the pointer VALUE we pass is C's buffer address, so we hand
+        // it a `*[*]u8` whose value is &ctx.buf — i.e. @ptrCast(&ctx.buf).
+        istream.readAsync(@ptrCast(&ctx.buf), ctx.buf.len, 0, null, onReadComplete, ctx);
         return @intFromBool(true);
+    }
+
+    /// Async-read completion (main loop): parse the message, then free the
+    /// context and drop the connection ref taken in `onIncoming`.
+    fn onReadComplete(_: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const ctx: *ReadCtx = @ptrCast(@alignCast(data.?));
+        defer {
+            ctx.connection.as(gobject.Object).unref();
+            ctx.server.alloc.destroy(ctx);
+        }
+        const istream = ctx.connection.as(gio.IOStream).getInputStream();
+        var gerr: ?*glib.Error = null;
+        defer if (gerr) |e| e.free();
+        const n = istream.readFinish(res, &gerr);
+        if (n <= 0) return; // EOF or error: nothing usable.
+        const msg = std.mem.trim(u8, ctx.buf[0..@intCast(n)], " \t\r\n");
+        ctx.server.handle(msg);
     }
 
     /// Parse + act on one message line. Public for direct unit-style exercise.

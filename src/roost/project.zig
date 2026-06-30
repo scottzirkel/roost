@@ -290,6 +290,13 @@ pub fn recordRecent(alloc: Allocator, project_path: []const u8) void {
 }
 
 fn recordRecentImpl(alloc: Allocator, project_path: []const u8) !void {
+    // The recents file is newline-delimited, so a path containing a newline
+    // (legal on Linux) would split into bogus entries on the next read,
+    // corrupting the list. Such paths are pathological — skip recording rather
+    // than mangle every other recent. (Entries already on disk are newline-free
+    // by construction, so only the freshly-promoted path needs this guard.)
+    if (std.mem.indexOfScalar(u8, project_path, '\n') != null) return;
+
     const path = try recentsPath(alloc);
     defer alloc.free(path);
 

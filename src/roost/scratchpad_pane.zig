@@ -108,6 +108,12 @@ pub const ScratchpadPane = struct {
         scrolled.as(gtk.Widget).setVexpand(1);
         scrolled.as(gtk.Widget).setHexpand(1);
 
+        // Hold our own ref on the view so `destroy`'s final `saveNow` can still
+        // read the buffer: teardown (closeNode/rebuild/window-close) finalizes
+        // the widget tree BEFORE Pane.destroy runs, which would otherwise free
+        // the buffer out from under that flush. Released in `destroy`.
+        _ = text_view.as(gobject.Object).ref();
+
         return .{
             .alloc = alloc,
             .scrolled = scrolled,
@@ -149,6 +155,9 @@ pub const ScratchpadPane = struct {
             self.save_source = 0;
             self.saveNow();
         }
+        // Release the keepalive ref taken in `init` (after the final saveNow has
+        // read the buffer), letting the view + buffer finalize.
+        self.text_view.as(gobject.Object).unref();
         if (self.path) |p| self.alloc.free(p);
         self.* = undefined;
     }
@@ -472,7 +481,14 @@ fn writeScratch(alloc: Allocator, path: []const u8, text: []const u8) !void {
         };
         if (std.mem.eql(u8, std.fs.path.basename(dir), ".roost")) ensureSelfIgnore(alloc, dir);
     }
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = text });
+    // Write atomically: a torn write (crash / power loss / ENOSPC) must not
+    // destroy the user's prior notes. Write a sibling temp, then rename(2) over
+    // the target so readers only ever see a complete file.
+    const tmp = try std.fmt.allocPrint(alloc, "{s}.tmp", .{path});
+    defer alloc.free(tmp);
+    errdefer std.fs.cwd().deleteFile(tmp) catch {};
+    try std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = text });
+    try std.fs.cwd().rename(tmp, path);
 }
 
 /// Ensure `<dir>/.gitignore` exists containing `*` (so the dir ignores its own

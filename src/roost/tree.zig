@@ -1017,6 +1017,20 @@ pub const Tree = struct {
         _ = sib_obj.ref();
         defer sib_obj.unref();
 
+        // Likewise hold a ref on the CLOSING leaf's widget across the detach:
+        // unparenting an idle pane's box can drop the surface's last ref and
+        // finalize it, so the pane.destroy()->surface.close() below would run on
+        // freed memory. Every other detach in this file is ref-protected too.
+        const close_obj = leaf.widget().as(gobject.Object);
+        _ = close_obj.ref();
+        defer close_obj.unref();
+
+        // Whether the pane being closed currently holds focus. closeNode is
+        // shared with closeSurface (a BACKGROUND pane's child exiting), so we
+        // only move focus to the sibling when the closing pane actually had it —
+        // otherwise a background process dying would steal focus mid-typing.
+        const had_focus = self.focused == leaf;
+
         // Detach BOTH children from the parent paned. Now the paned is empty.
         split.paned.setStartChild(null);
         split.paned.setEndChild(null);
@@ -1041,8 +1055,9 @@ pub const Tree = struct {
         // Promote the sibling into the slot the parent used to hold.
         self.attach(parent_slot, sibling);
 
-        // Focus a leaf within the promoted sibling subtree.
-        self.focusNode(firstLeaf(sibling));
+        // Focus a leaf within the promoted sibling subtree — but only if the
+        // closed pane was the focused one (see `had_focus` above).
+        if (had_focus) self.focusNode(firstLeaf(sibling));
         return .collapsed;
     }
 
