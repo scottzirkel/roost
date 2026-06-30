@@ -53,9 +53,12 @@ pub fn run(alloc: Allocator, argv: []const []const u8, cwd: ?[]const u8) !Output
         .Exited => |c| c,
         else => 1,
     };
-    return .{
-        .code = code,
-        .stdout = try stdout.toOwnedSlice(alloc),
-        .stderr = try stderr.toOwnedSlice(alloc),
-    };
+    // Bind the first owned slice to a local with its own errdefer: toOwnedSlice
+    // empties the ArrayList (so the `stdout.deinit` errdefer above no longer frees
+    // anything), and if the *second* toOwnedSlice then OOMs, this slice would
+    // otherwise leak with no owner.
+    const out = try stdout.toOwnedSlice(alloc);
+    errdefer alloc.free(out);
+    const err = try stderr.toOwnedSlice(alloc);
+    return .{ .code = code, .stdout = out, .stderr = err };
 }
