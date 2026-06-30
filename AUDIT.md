@@ -10,12 +10,18 @@ independently, adversarially verified. **46 candidates → 33 verified**
 out of scope. Two recurring themes: GTK widget-lifecycle / teardown
 ordering, and error-path memory ownership.
 
-## Outcome (33 verified findings)
-- **14 fixed** — `fc904e0` (2 HIGH + 4 MEDIUM + 3 durability + 3 action-modal
-  follow-ups) and `4603b5c` (2 simplifications).
-- **14 actionable, deferred (12 items)** — tracked in `TODO.md` →
-  "▶ Audit follow-ups". None reachable in ordinary use except the
-  markdown/ANSI rendering glitches and the per-split ratio-slot leak.
+## Outcome (33 verified findings) — 28 fixed, 5 won't-fix, 0 open (2026-06-30)
+- **14 fixed (initial pass)** — `fc904e0` (2 HIGH + 4 MEDIUM + 3 durability + 3
+  action-modal follow-ups) and `4603b5c` (2 simplifications).
+- **14 fixed (follow-up pass, 2026-06-30 — 12 items)** — the rest of the
+  actionable backlog, tracked in `TODO.md` → "▶ Audit follow-ups". Reachable:
+  `md.zig` emphasis flanking (`d560775`), `ansi.zig` re-sync (`2f54a0a`),
+  `tree.zig` ratio-slot leak (`5ff65e1`), `app.zig` orphan children (`8ba4084`).
+  Edge/OOM-gated: `app.zig` agent-cmd UAF + stopRun pid (`28e76eb`), `config.zig`
+  agent-literal free + `resolvePath` (`92b2d56`), `git.zig` `addWorktree`
+  false-success (`657f8ab`), `proc.zig` `run` leak (`e03ac1a`), `tree.zig`
+  `buildFromSer` floating-widget leak (`71797e0`), `tree.zig`
+  `splitFocused`/`splitGroup` detach-UAF + leak (`cc94aa4`).
 - **5 decided NOT to fix** — recorded below so a future audit doesn't
   re-raise them.
 
