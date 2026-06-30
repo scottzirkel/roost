@@ -718,8 +718,12 @@ fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int
         return @intFromBool(true); // veto: keep the window open behind the dialog
     }
     // Committed to closing: stop any in-flight action's idle callback from
-    // touching the workspace as it tears down (it'll just free its payload).
+    // touching the workspace as it tears down (it'll just free its payload)…
     actions_alive = false;
+    // …and TERM their child process groups so they don't orphan to init — the
+    // quit dialog promises to "end everything running in it." (Order: flip the
+    // flag first so the children's exit idles no-op against the torn-down state.)
+    stopActiveRuns();
     saveLayout(app_ctx);
     running = false;
     return @intFromBool(false);
@@ -760,6 +764,11 @@ fn onReload(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
 /// Confirmed reload: persist the layout, then re-exec into the latest build.
 fn doReload(a: *AppContext) void {
     saveLayout(a);
+    // TERM in-flight action children before the image swap — re-exec keeps our
+    // PID and won't signal them, so they'd otherwise run on (the dialog says they
+    // end). We do NOT flip `actions_alive` here: reExecSelf returns on failure
+    // and we must stay fully functional (the stopped runs finalize as usual).
+    stopActiveRuns();
     log.info("reloading roost (re-exec into latest build)", .{});
     reExecSelf(a) catch |err| {
         log.warn("reload failed; staying put err={}", .{err});
@@ -2132,6 +2141,17 @@ fn stopRun(ar: *ActionRun) void {
     const pid = @atomicLoad(i32, &ar.pid, .acquire);
     // Negative pid = the process group (the child leads its own group).
     if (pid > 0) std.posix.kill(-pid, std.posix.SIG.TERM) catch {};
+}
+
+/// TERM every in-flight action's child process group so they don't keep running
+/// (and orphan to init) when this window goes away. Both quit (`onWindowClose-
+/// Request`) and reload (`doReload`) call this — the quit/reload dialogs both
+/// promise to end "everything running in" the window. `stopRun` signals each
+/// child's whole group. Main-thread only (callers are).
+fn stopActiveRuns() void {
+    for (active_runs.items) |ar| {
+        if (!ar.done) stopRun(ar);
+    }
 }
 
 /// The effective route for a finished run (exit 0 → success route, else failure).
