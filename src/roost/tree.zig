@@ -367,13 +367,16 @@ pub const Tree = struct {
                         return error.Invalid;
                 // If a deeper node is invalid (or makeSplit OOMs), free the
                 // children already built so the partial subtree doesn't leak.
-                // Safe to tear down here: close_cb is still null during the
-                // build (callers connect it after init), so makeLeaf hasn't
-                // wired any surface close-request handler that could re-enter.
+                // `destroyFloating` (not `destroyNode`) because these children
+                // were never parented, so their floating box/paned widgets would
+                // otherwise leak. Safe to tear down here: close_cb is still null
+                // during the build (callers connect it after init), so makeLeaf
+                // hasn't wired any surface close-request handler that could
+                // re-enter.
                 const start = try self.buildFromSer(s.start);
-                errdefer self.destroyNode(start);
+                errdefer self.destroyFloating(start);
                 const end = try self.buildFromSer(s.end);
-                errdefer self.destroyNode(end);
+                errdefer self.destroyFloating(end);
                 const ratio = std.math.clamp(s.ratio, 0.05, 0.95);
                 return self.makeSplit(orientation, start, end, ratio);
             },
@@ -542,6 +545,25 @@ pub const Tree = struct {
         }
         if (self.highlighted == node) self.highlighted = null;
         self.alloc.destroy(node);
+    }
+
+    /// Tear down a subtree whose top widget is still FLOATING — i.e. it was built
+    /// but never parented (the `buildFromSer` error path, or an orphaned new leaf
+    /// when a split alloc fails). `destroyNode` alone only frees the panes + nodes
+    /// and leaves widget reclamation to the GTK parent; with no parent here, the
+    /// floating box/paned (and its children) would leak. `ref_sink` claims the
+    /// floating reference (so the widget survives `destroyNode`'s surface closes),
+    /// and the final `unref` finalizes the whole widget subtree. The
+    /// `tearing_down` guard suppresses the re-entrant close-request a terminal
+    /// pane emits while closing (only relevant once `close_cb` is wired).
+    fn destroyFloating(self: *Tree, node: *Node) void {
+        const obj = node.widget().as(gobject.Object);
+        _ = obj.refSink();
+        const prev = self.tearing_down;
+        self.tearing_down = true;
+        self.destroyNode(node);
+        self.tearing_down = prev;
+        obj.unref();
     }
 
     /// Remove a leaf's pending focus-follows-mouse dwell timer (if any) so the
