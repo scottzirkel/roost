@@ -429,7 +429,7 @@ pub fn run() !void {
     //     detailed `win.<name>` action strings via the GtkApplication. The
     //     SimpleActions are owned by the window's ActionMap after `addAction`.
     const gtk_app = gapp.as(gtk.Application);
-    setupShortcuts(window, gtk_app, &workspace, &app_ctx);
+    setupShortcuts(window, gtk_app, &app_ctx);
 
     // Header bar (set after shortcuts so its buttons' actions exist). It's the
     // window titlebar, so it persists across workspace rebuilds. Register our
@@ -896,19 +896,20 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 fn setupShortcuts(
     window: *gtk.ApplicationWindow,
     gtk_app: *gtk.Application,
-    _: *Workspace,
     app_ctx: *AppContext,
 ) void {
     const map = window.as(gio.ActionMap);
 
-    // Focus by leaf index: Alt+1..9.
-    inline for (.{
-        .{ "focus-1", onFocus1 }, .{ "focus-2", onFocus2 },
-        .{ "focus-3", onFocus3 }, .{ "focus-4", onFocus4 },
-        .{ "focus-5", onFocus5 }, .{ "focus-6", onFocus6 },
-        .{ "focus-7", onFocus7 }, .{ "focus-8", onFocus8 },
-        .{ "focus-9", onFocus9 },
-    }) |pair| addAction(map, pair[0], pair[1], app_ctx);
+    // Focus by leaf index: Alt+1..9. PARAMETERIZED (int32 = leaf index) so one
+    // action serves all nine accelerators (mirrors `run-action` below).
+    {
+        const vt = glib.VariantType.new("i");
+        defer vt.free();
+        const fa = gio.SimpleAction.new("focus-n", vt);
+        defer fa.unref();
+        _ = gio.SimpleAction.signals.activate.connect(fa, *AppContext, onFocusN, app_ctx, .{});
+        map.addAction(fa.as(gio.Action));
+    }
 
     // Directional focus movement: Ctrl+Alt+Arrow.
     addAction(map, "focus-left", onFocusLeft, app_ctx);
@@ -995,15 +996,15 @@ fn setupShortcuts(
     }
 
     // Accelerators.
-    setAccel(gtk_app, "win.focus-1", "<Alt>1");
-    setAccel(gtk_app, "win.focus-2", "<Alt>2");
-    setAccel(gtk_app, "win.focus-3", "<Alt>3");
-    setAccel(gtk_app, "win.focus-4", "<Alt>4");
-    setAccel(gtk_app, "win.focus-5", "<Alt>5");
-    setAccel(gtk_app, "win.focus-6", "<Alt>6");
-    setAccel(gtk_app, "win.focus-7", "<Alt>7");
-    setAccel(gtk_app, "win.focus-8", "<Alt>8");
-    setAccel(gtk_app, "win.focus-9", "<Alt>9");
+    // Alt+1..9 → win.focus-n(0..8). The detailed-name's bare-integer target
+    // parses as the int32 the action expects.
+    inline for (1..10) |n| {
+        setAccel(
+            gtk_app,
+            std.fmt.comptimePrint("win.focus-n({d})", .{n - 1}),
+            std.fmt.comptimePrint("<Alt>{d}", .{n}),
+        );
+    }
     // Directional ops each get an arrow + its vim hjkl alias (h=left, j=down,
     // k=up, l=right). No-shift combos use lowercase letters; shift combos use
     // uppercase (matching the keyval that arrives when Shift is held).
@@ -1084,35 +1085,13 @@ fn setAccel2(gtk_app: *gtk.Application, action: [:0]const u8, a1: [*:0]const u8,
 
 // --- Focus handlers --------------------------------------------------------
 
-fn focusN(app_ctx: *AppContext, idx: usize) void {
-    app_ctx.workspace.focusIndex(idx);
-}
-fn onFocus1(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 0);
-}
-fn onFocus2(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 1);
-}
-fn onFocus3(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 2);
-}
-fn onFocus4(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 3);
-}
-fn onFocus5(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 4);
-}
-fn onFocus6(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 5);
-}
-fn onFocus7(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 6);
-}
-fn onFocus8(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 7);
-}
-fn onFocus9(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
-    focusN(a, 8);
+/// Focus a leaf by index (Alt+1..9). PARAMETERIZED int32 target, so this one
+/// handler replaces the former onFocus1..onFocus9 + focusN.
+fn onFocusN(_: *gio.SimpleAction, param: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    const v = param orelse return;
+    const idx_i = v.getInt32();
+    if (idx_i < 0) return;
+    a.workspace.focusIndex(@intCast(idx_i));
 }
 fn onFocusLeft(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.moveFocus(.left);
