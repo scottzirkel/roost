@@ -118,6 +118,12 @@ var activity_modal: ?*Activity = null;
 /// the notification ThemedIcon (ipc.zig) must match this exact string.
 const app_id = "dev.scottzirkel.Roost";
 
+/// Standard content width for our AdwAlertDialog modals. AlertDialog otherwise
+/// shrinks to fit its action labels (or short content), which looks cramped and
+/// inconsistent from one dialog to the next; pin the extra-child width so every
+/// modal opens at the same comfortable size.
+const standard_modal_width: c_int = 600;
+
 /// Flags we force into our own argv before apprt parses config from it:
 ///   - `--class=<app_id>`: adopt our dedicated GTK app id instead of Ghostty's
 ///     default `com.mitchellh.ghostty[-debug]`.
@@ -1464,13 +1470,15 @@ fn confirmSwitch(a: *AppContext, new_path: []const u8) void {
     req.* = .{ .a = a, .path = path };
 
     const dialog = adw.AlertDialog.new("Switch project?", "Replace this window with the project, or open it in a new window.");
-    // Order shown: Switch, Open in New Window, Cancel. Only "switch" is
-    // destructive (it tears down this workspace); "newwin" leaves it untouched.
+    // Order shown: Switch, Open in New Window, Cancel. "switch" is the primary
+    // action (the user just picked a project to open here), so it's the
+    // suggested default and takes focus — Enter switches. "newwin" leaves this
+    // workspace untouched; "cancel" backs out.
     dialog.addResponse("switch", "Switch");
     dialog.addResponse("newwin", "Open in New Window");
     dialog.addResponse("cancel", "Cancel");
-    dialog.setResponseAppearance("switch", .destructive);
-    dialog.setDefaultResponse("cancel");
+    dialog.setResponseAppearance("switch", .suggested);
+    dialog.setDefaultResponse("switch");
     dialog.setCloseResponse("cancel");
     dialog.choose(a.window.as(gtk.Widget), null, onSwitchResponse, req);
 }
@@ -2589,9 +2597,9 @@ fn presentActionPalette(a: *AppContext) void {
     scroller.setChild(list.as(gtk.Widget));
 
     const vbox = gtk.Box.new(.vertical, 8);
-    // Give the palette a comfortable minimum width (the AlertDialog otherwise
+    // Give the palette our standard modal width (the AlertDialog otherwise
     // shrinks to the short action labels).
-    vbox.as(gtk.Widget).setSizeRequest(560, -1);
+    vbox.as(gtk.Widget).setSizeRequest(standard_modal_width, -1);
     vbox.append(search.as(gtk.Widget));
     vbox.append(scroller.as(gtk.Widget));
 
@@ -3036,6 +3044,9 @@ fn presentChooser(a: *AppContext) void {
     const scroller = gtk.ScrolledWindow.new();
     scroller.setMinContentHeight(260);
     scroller.setPropagateNaturalHeight(1);
+    // Pin the extra-child width so the dialog opens at our standard modal size
+    // rather than shrinking to fit the short action labels.
+    scroller.as(gtk.Widget).setSizeRequest(standard_modal_width, -1);
     scroller.setChild(list_box.as(gtk.Widget));
 
     const dialog = adw.AlertDialog.new(
