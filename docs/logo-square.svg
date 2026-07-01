@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<!-- Roost app icon (dev.scottzirkel.Roost): the square variant of the official
-     Roost logo — the ghost-bird mark on a rounded light tile, sized for a
-     launcher/taskbar square. Same art as docs/logo-square.svg, whose native
-     viewBox is 657x702 (slightly taller than wide); here the viewBox is squared
-     to 702x702 (content centered, -22.5 x-offset) so install-icon.sh can render
-     it to a square PNG WITHOUT the ~7% horizontal stretch a non-square source
-     would get. Full color (this is the brand mark, not a theme-neutral glyph).
-     scripts/install-icon.sh renders it to PNGs (16-512) + this SVG into hicolor.
-     The tall wordmark variant lives at docs/logo.svg. -->
-<svg width="256" height="256" viewBox="-22.5 0 702 702" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+<svg width="100%" height="100%" viewBox="0 0 657 702" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
     <g transform="matrix(1,0,0,1,-510.737,-701.598)">
         <g transform="matrix(1,0,0,1,-48,417.892)">
             <g transform="matrix(1,0,0,1,209.665,0)">

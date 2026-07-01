@@ -1,4 +1,6 @@
-<h1 align="center">Roost</h1>
+<h1 align="center">
+  <img src="docs/logo-full.svg" alt="Roost" width="520">
+</h1>
 
 <p align="center">
   <strong>An agent command center for the terminal.</strong><br>
@@ -97,7 +99,7 @@ first) and the app icon:
 
 ```sh
 cp scripts/roost.desktop ~/.local/share/applications/
-scripts/install-icon.sh                 # ghost-bird icon → your hicolor theme
+scripts/install-icon.sh                 # Roost logo icon → your hicolor theme
 ```
 
 ## Usage
@@ -201,7 +203,7 @@ Roost is **early but usable** — the core is complete and in daily use:
 - ✅ Scratchpad ↔ Agent (send selection, capture output) with live Markdown styling
 - ✅ Settings dialog, focus-follows-mouse (with dwell), keyboard cheat-sheet, app icon
 
-The original roadmap gaps are now closed: the ghost-bird app **icon**, the Agent-pane
+The original roadmap gaps are now closed: the Roost app **icon**, the Agent-pane
 **`Ctrl+Z`** remap (→ Claude Code's undo), live scratchpad **Markdown styling** and
 **capturing agent output** into it, and **"New Worktree…" opening in a new window**
 are all done. No known feature gaps remain — issues and ideas welcome.
@@ -223,3 +225,8 @@ project (also MIT), consumed unmodified as a submodule.
   this possible.
 - [supacode](https://github.com/supabitapp/supacode) — the macOS app that
   inspired the shape of this one.
+
+## Logo
+
+The Roost logo and brand marks were designed by **[Scott Zirkel](https://github.com/scottzirkel)**,
+by hand — no AI involved.

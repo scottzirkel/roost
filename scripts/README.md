@@ -22,27 +22,19 @@ binary directly: `vendor/ghostty/zig-out/bin/roost`. The desktop launcher
 
 ## `install-icon.sh` — the app icon
 
-Installs the Roost app icon (`dev.scottzirkel.Roost`, the "ghost bird") into your
-hicolor icon theme so the launcher, taskbar, Alt-Tab, and the notification
-fallback render it instead of a generic icon. Renders the canonical SVG
-(`src/roost/icons/scalable/apps/dev.scottzirkel.Roost.svg`) to PNGs at the
-standard sizes plus the SVG, under `${XDG_DATA_HOME:-~/.local/share}/icons/hicolor`.
+Installs the Roost app icon (`dev.scottzirkel.Roost`) into your hicolor icon
+theme so the launcher, taskbar, Alt-Tab, and the notification fallback render it
+instead of a generic icon. The icon is the **square variant of the official
+Roost logo** (`src/roost/icons/scalable/apps/dev.scottzirkel.Roost.svg`, the same
+art as `docs/logo-square.svg`); the script renders it to PNGs at the standard
+sizes plus the SVG, under `${XDG_DATA_HOME:-~/.local/share}/icons/hicolor`.
 
 ```sh
 /home/scott/projects/roost/scripts/install-icon.sh
 ```
 
-The icon is monochrome and **theme-neutral** (a plain neutral light tone, no
-palette-specific color) so it reads on every Omarchy theme. To recolor it — e.g.
-to the active theme's accent — pass a hex and re-run:
-
-```sh
-./scripts/install-icon.sh '#7aa2f7'         # or: ROOST_ICON_FILL='#7aa2f7' ./scripts/install-icon.sh
-```
-
-Idempotent; re-run after editing the SVG or to change the color. Requires
-`rsvg-convert` (librsvg). The `.desktop` file already points at this icon
-(`Icon=dev.scottzirkel.Roost`).
+Idempotent; re-run after editing the SVG. Requires `rsvg-convert` (librsvg). The
+`.desktop` file already points at this icon (`Icon=dev.scottzirkel.Roost`).
 
 # Roost agent integration scripts
 
