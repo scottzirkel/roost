@@ -520,7 +520,12 @@ fn lazygitAvailable() bool {
 
 /// Returns true if `cmd` resolves to an executable on PATH. Reuses Ghostty's
 /// PATH-resolution helper; any error or miss returns false.
-fn commandOnPath(cmd: [:0]const u8) bool {
+///
+/// Note `expand` returns any string containing `/` verbatim without stat-ing
+/// it, so a path-shaped command always "resolves". That laxness is Ghostty's
+/// and is left alone here — the check is a UX guard (fall back to a plain shell
+/// rather than show a "command not found" pane), not a security boundary.
+fn commandOnPath(cmd: []const u8) bool {
     const alloc = state.alloc;
     const found = internal_os.path.expand(alloc, cmd) catch return false;
     if (found) |p| {
@@ -540,7 +545,16 @@ fn commandOnPath(cmd: [:0]const u8) bool {
 fn resolveAgentCmd(alloc: std.mem.Allocator, configured: [:0]const u8) ?[:0]const u8 {
     const cmd: [:0]const u8 = std.posix.getenv("ROOST_AGENT") orelse configured;
     if (cmd.len == 0) return null;
-    if (!commandOnPath(cmd)) return null;
+    // The command is spawned via `.shell`, so arguments are legal: `claude
+    // --resume`, `codex exec`. But the PATH check has to be made against the
+    // *executable* alone — expanding the whole string looks for a binary
+    // literally named "claude --resume", misses, and silently drops the pane to
+    // a bare shell.
+    //
+    // Whole string first so nothing that resolved before stops resolving (an
+    // unquoted path containing spaces, say); the executable token is the
+    // fallback that makes arguments work.
+    if (!commandOnPath(cmd) and !commandOnPath(detect.firstToken(cmd))) return null;
     // On OOM fall back to the shell (the null contract) rather than returning the
     // borrowed `configured` string: it's owned by the live Config and a later
     // Settings agent edit frees it, which would dangle this snapshot.
