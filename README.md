@@ -38,8 +38,9 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 ## Features
 
 - **Role-typed panes** — Agent, Shell, Git, Editor, and an in-app Markdown
-  Scratchpad. The Agent pane runs `claude` (or `$ROOST_AGENT`); the Git pane runs
-  `lazygit`; each falls back to your shell if the tool isn't installed.
+  Scratchpad. The Agent pane runs `claude` (or `$ROOST_AGENT`, arguments and all
+  — `claude --resume` works); the Git pane runs `lazygit`; each falls back to
+  your shell if the tool isn't installed.
 - **Free-form pane tree** — split any pane, add a pane by role, close, or reset
   to the default 2×2. Not fixed quadrants — arrange it however you like.
 - **Per-project layouts** — your arrangement (including split sizes) is saved and
@@ -52,6 +53,16 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Agent-aware notifications** — wire Roost into Claude Code's hooks and the
   Agent pane raises a desktop notification + a status badge when the agent
   finishes (`✓ done`) or needs you (`🔔 needs you`).
+- **Agent state without setup** — when hooks aren't wired (or you're running
+  something other than Claude), Roost reads the pane's own screen and terminal
+  title to work out whether the agent is `● working`, `🔔 needs you`, `✓ done`,
+  or idle. Rules are written against the real CLIs (`claude`, `codex`,
+  `opencode`, `gemini` — probed, not guessed), and an unrecognised agent still
+  gets a live badge from its spinner and prompts. Hooks always win when they're
+  reporting — scraping only fills the silence.
+- **Many agents at once** — every Agent pane tracks its own state, and the
+  window title rolls up whichever one most wants you (`🔔` > `✓` > `●`), so a
+  Roost window that needs you says so from the taskbar.
 - **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
   `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
   Agent pane's output back into the Scratchpad. The Scratchpad renders Markdown
@@ -157,6 +168,13 @@ Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can
 never break your agent.
 
+Hooks are optional. Without them, Roost falls back to reading the Agent pane's
+visible screen every 600ms and classifying it (`src/roost/core/agent_detect.zig`).
+A pane that *has* reported through a hook stops being scraped for the rest of
+its life — an agent that tells you what it's doing is never second-guessed by a
+reading of its footer. Only the desktop notification needs hooks; the badge and
+the window-title rollup work either way.
+
 ## Configuration
 
 - **Terminal look & feel** is your existing Ghostty config (`~/.config/ghostty`),
@@ -186,12 +204,29 @@ step.
 
 ```
 src/roost/            the workspace: panes, tree, layout, git, IPC, scratchpad
+src/roost/core/       portable logic: std-only, no GTK (see below)
 src/main_roost.zig    thin entry point
 patches/              additive build.zig step
 scripts/              roost-notify (agent hooks), roost.desktop, toolchain patch
 vendor/ghostty/       Ghostty submodule (pinned, vanilla upstream)
 build.sh              overlay + build
 ```
+
+### The portable core
+
+`src/roost/core/` holds the parts of Roost that don't need a UI toolkit —
+today, agent-state detection. Everything in it is std-only Zig with no GTK and
+no Ghostty imports, enforced on every build by `scripts/check-core.sh` (the same
+kind of mechanical gate as the additive-Ghostty one, for the same reason: a rule
+nobody checks is a rule that rots).
+
+The point is portability. GTK4 has no supported path on macOS — Ghostty itself
+builds its Mac app in Xcode against `libghostty` rather than GTK — so a native
+macOS Roost needs a second *shell*, but it should not need a second *brain*.
+Keeping the decision logic toolkit-free means it can be compiled into a static
+library behind a C ABI and driven from Swift exactly the way Ghostty drives
+libghostty. Anything that talks in plain data belongs in `core/`; anything that
+touches a widget stays in `src/roost/`.
 
 ## Status & roadmap
 
@@ -200,6 +235,9 @@ Roost is **early but usable** — the core is complete and in daily use:
 - ✅ Real Ghostty panes, free-form pane tree, per-project persisted layouts
 - ✅ Git worktree create + switch (and into a new window), project/worktree chooser, recents
 - ✅ Agent command + socket IPC → desktop notifications + status badge
+- ✅ Hook-free agent-state detection (screen + OSC title), N agent panes each
+  tracked independently, attention rolled up into the window title
+- ✅ Portable `core/` with an enforced no-toolkit gate (groundwork for macOS)
 - ✅ Scratchpad ↔ Agent (send selection, capture output) with live Markdown styling
 - ✅ Settings dialog, focus-follows-mouse (with dwell), keyboard cheat-sheet, app icon
 

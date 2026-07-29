@@ -7,6 +7,150 @@ Roost is a GTK4 "agent command center" for Omarchy/Hyprland — a focused clone 
 **▶ Recommended next:** **customizable wired actions DONE + user-verified (2026-06-26)** — `actions.zig` + `proc.zig` + async/streaming runner + routing + header dropdown + Ctrl+Shift+P palette + **live progress** (streaming output modal, named header spinner, Stop button). Committed `50d7047` (base) + a live-progress follow-up. Everything prioritized is now DONE & committed (fresh backlog `36383d2`, Agent-pane Ctrl+Z→undo `dea5ec3`, stale-socket sweep `18f588a`, Roost ghost-bird icon `429c021`). **The three remaining small items are now DONE & committed (2026-06-29):** capture agent output → scratchpad (Ctrl+Shift+Y, `ac8f303`), chooser "New Worktree…" → new window (`61d4ddb`), FFM ~150ms dwell (`d093990`), and the cheat-sheet first-run hint (in `61d4ddb`). **No known backlog feature items remain.** All three were user-verified ("works well"). Only an optional nice-to-have is left (FFM-toggle on-screen feedback) — see Deferred for details. (Pane swap committed `4d2eebd`; active-pane indicator + spatial directional focus shipped in "3e". **Confirm-close-while-agent-running** + quit/switch confirms COMMITTED `c58bfb0` (pushed). **exit-closes-pane** (AUTO-CLOSE on exit) built + user-verified + COMMITTED `eab0496` (pushed) 2026-06-24. **group-split** (Ctrl+Shift+Alt+R/D — split a whole column/row as a unit; fixes the "divider lock") user-verified + COMMITTED `e66879a` (pushed) 2026-06-24. **keyboard pane resize** (Ctrl+Shift+Arrow) + **vim hjkl aliases** on all directional bindings, user-verified + COMMITTED `c3406d4` (pushed) 2026-06-24. **keybinding cheat-sheet** (Ctrl+Shift+/) user-verified + COMMITTED `f0fbf5f` (pushed) 2026-06-24. **focus-follows-mouse** (on by default, Ctrl+Shift+M toggles) user-verified + COMMITTED `23f447f` (pushed) 2026-06-24. **header bar** (split/FFM-toggle/help buttons + bundled custom-icon pipeline) user-verified + COMMITTED `754dc63` (pushed) 2026-06-24. See Deferred.)
 
 ## Status — DONE & verified
+
+### ▶ Agent-state detection + portable core (2026-07-29 — built, live-verified, UNCOMMITTED)
+Prompted by a comparison against **herdr** (`github.com/ogulcancelik/herdr`, Rust
+TUI agent multiplexer, Apache-2.0) — the two ideas worth taking were its
+hook-or-scrape agent detection and its control API. Detection is done; the
+control API is not started.
+
+- **`src/roost/core/agent_detect.zig` (NEW, ~640 lines incl. 24 tests).** Pure
+  std-only classifier: `Manifest` (per-agent ruleset) → `Rule` (priority,
+  `Region` of title/bottom-N-lines/screen, `Match` of any/all/same_line_all/
+  spinner) → `classify()` → `Verdict`. Highest priority wins, ties to the earlier
+  rule, nothing matched → `.unknown` (caller holds previous state). `Tracker`
+  layers the lifecycle on top: synthesizes `.done` on working→idle AND
+  blocked→idle (both end a run), keeps `.done` sticky until work resumes, and
+  `report()` marks a pane hook-driven so scraping defers to it **permanently**.
+  Built-ins: claude / codex / opencode / gemini + a `generic` fallback (spinner
+  + y/n only) so an unknown agent still gets a live badge. Allocation-free on
+  the hot path (fixed `Lines` window of borrowed slices). Braille-spinner check
+  is a 3-byte UTF-8 test, no decoder. Rules were written from observable chrome,
+  NOT copied from herdr's manifests — herdr is Apache-2.0, we're MIT.
+- **`scripts/check-core.sh` (NEW) + build.sh step 1.5.** Fails the build if
+  anything under `src/roost/core/` imports gtk/adw/gdk/gio/glib/gobject or
+  climbs into the Ghostty tree (`@import("../../`). Verified in both directions
+  with a throwaway probe file. This is the seam for a macOS shell — see below.
+- **`terminal_pane.zig`:** added `captureScreen()` (visible rows only, via
+  `Selection.init(pages.getTopLeft(.active), pages.getBottomRight(.active))` →
+  `selectionString`) and `title()` (`Surface.getTitle()`). `captureScreen` exists
+  separately from `captureText` on purpose: detection polls it, so cost must
+  track window size, not scrollback depth.
+- **`tree.zig`:** `Leaf` gained `agent: detect.Tracker` + `manifest` — **per-leaf,
+  so N agent panes each track independently**. `manifest` is chosen at spawn from
+  the launch command (`detect.manifestFor(agent_cmd)`). New `pollAgents()` walk
+  (skips non-agent leaves, hooked panes, and dead children), `agentAttention()`
+  max-rollup, and `AgentStatus.fromDetect`/`toDetect`. `setAgentStatus` now
+  routes hook events through the first agent leaf's tracker (so `hooked` gets set)
+  as well as painting the label.
+- **`app.zig`:** 600ms `glib.timeoutAdd` → `onDetectTick` → `pollAgents` +
+  `applyAttention`; source removed on teardown via `defer`. Window title gets a
+  `🔔 `/`✓ `/`● ` prefix for the rolled-up state, composed by **stripping the
+  prefix off the live title and re-prefixing** — no cached base string, so it
+  stays correct no matter which path last set the title (startup / project
+  switch / worktree switch) and never re-shells to `git` for the branch.
+  Gotcha hit: `state` is already a module-level const in app.zig, so locals had
+  to be named `attn`.
+- **Verified live** (fake `claude` on PATH cycling working→blocked→idle,
+  window title read back via `hyprctl clients`): single agent cycled
+  `● → 🔔 → ✓ → ●` correctly; with a **second** Agent pane added (Ctrl+Shift+A)
+  the rollup stayed on `🔔`/`✓` instead of following either agent's own cycle,
+  which is the max-over-independent-trackers behavior. 24/24 core tests, md 14/14,
+  ansi 10/10, build + additive gate + core gate all green.
+- **Known gap (deliberate, not a bug):** hook events still address the **first**
+  agent pane, because the `ROOST_SOCK` protocol has no pane identity. Additional
+  agent panes are detection-driven. Fixing it needs a per-pane env var
+  (`ROOST_PANE`) exported into each pane — `StartOptions.env` exists but is
+  currently accepted-and-unused by the Ghostty backend. See Deferred.
+
+#### Manifests rewritten against REAL probes (2026-07-29, same day)
+The first cut of the rulesets was guesswork and was **mostly wrong**. Each CLI
+was then driven for real inside a fixed 120x32 tmux pane, reading back exactly
+what the detector gets (`capture-pane -p` = visible screen, `#{pane_title}` =
+OSC title). Findings, all now encoded + covered by "captured …" regression
+tests built from verbatim screens (35 tests total):
+- **The OSC title is the best signal; the footer is the worst.** Claude Code 2.x
+  does **not** print "esc to interrupt" while working — the footer reads
+  "✽ Whirlpooling… (8s · ↓ 6 tokens)". The reliable signal is the title:
+  Braille while working (`⠂ Claude Code`), `✳ ` at rest (`✳ Claude Code`, then
+  `✳ <conversation summary>` after a turn). The original `? for shortcuts` idle
+  rule never fires in this version.
+- **Spinner glyphs are not universally Braille.** claude and codex animate
+  Braille into the *title*, but claude's footer spinner is ✢/✶/✻/✽ and
+  opencode's is ⬝ (U+2B1D). Braille-only footer rules silently never fired.
+- **opencode says "esc interrupt" — no "to".** The original rule missed it.
+- **A blocked agent can look idle in its title.** Claude's plan-approval menu
+  ("Would you like to proceed?" / "❯ 1. Yes, and use auto mode") renders while
+  the title still reads `✳ `. This is why screen-based blocked rules sit at
+  940–950 and title-based idle rules at 90–100. Verified, and now a test.
+- **codex**: title `⠦ <dir>` working / plain `<dir>` idle; footer "• Working (2s
+  • esc to interrupt)"; update dialog "Press enter to continue" = blocked.
+- **gemini**: only startup chrome observable (no API key on this machine) — the
+  trust dialog and API-key dialog are verified blocked; its working rules are
+  marked UNVERIFIED in the source. Its title reads "◇  Ready (dir)" *even while
+  a modal is blocking*, hence the low priority on that idle rule.
+- **`generic` deliberately has no idle rule.** For an unknown CLI there's
+  nothing safe to match, and a wrong idle would fabricate working→idle edges and
+  phantom "done" notifications.
+- **End-to-end with the real `claude` inside Roost:** title log shows
+  `✳ Claude Code` → `⠂ Claude Code` → `⠂ Count from 1 to 40` → `✳ Count from 1
+  to 40`, and the window title reached `✓` — which is only reachable by passing
+  through `working`. Pipeline confirmed against the real agent.
+
+### ▶ BUG FIXED (pre-existing, NOT from this work) — agent command couldn't take arguments
+**Symptom:** any `ROOST_AGENT` or `agent` setting containing arguments
+(`claude --resume`, `codex exec`) silently dropped the Agent pane to a bare
+shell. Found while setting up the live detection test —
+`ROOST_AGENT='claude "…"'` produced a zsh pane.
+
+**Cause:** `resolveAgentCmd` (app.zig) gated on `commandOnPath(cmd)` →
+`internal_os.path.expand(alloc, cmd)` against the **whole string**, so it
+searched PATH for a binary literally named `claude --resume`, missed, and
+returned null (the shell-fallback contract). The command is spawned via
+`.shell`, so arguments were always legal at spawn time — only the *check* was
+wrong.
+
+**Fix:** new `detect.firstToken()` in `core/agent_detect.zig` (quote-aware: a
+quoted first token containing spaces stays whole). `resolveAgentCmd` now accepts
+the command if the whole string resolves **or** its first token does —
+whole-string first, so nothing that resolved before stops resolving (e.g. an
+unquoted path containing spaces, which `expand` passes through because it
+contains `/`). `commandName` was refactored onto `firstToken`, so it picks up
+quote handling for free. `commandOnPath` relaxed to `[]const u8`.
+
+Also documented in `commandOnPath`: Ghostty's `expand` returns any string
+containing `/` **verbatim without stat-ing it**, so a path-shaped command always
+"resolves". Left as-is — the check is a UX guard (fall back to a shell rather
+than show a "command not found" pane), not a security boundary.
+
+**Verified live:** `ROOST_AGENT='claude "count slowly from 1 to 40…"'` now spawns
+`claude count slowly from 1 to 40, one number per line` in the Agent pane (was a
+bare zsh), the claude manifest is still selected (`commandName` → `firstToken`),
+and detection ran the full `✳ → ⠂ → ✳` cycle to a `✓` window title. Negative case
+re-checked: `ROOST_AGENT='definitelynotarealagent --flag'` still falls back to
+the shell. 6 new unit tests (37 total).
+
+
+### ▶ macOS portability — decision recorded (2026-07-29)
+Roost is **not** Wayland-coupled (zero Wayland references; the "Hyprland"
+mentions are comments about keymap feel). It is GTK4/libadwaita-coupled, and the
+coupling measured out at roughly: 1,681 lines already portable, ~595 more after
+light surgery, `tree.zig`'s 1,752 splittable into model + widget realization, and
+~4,046 genuinely platform shell (`app.zig` 3,142 / `scratchpad_pane` / `ipc`).
+So about half the codebase can be shared.
+
+**There is no GTK-on-macOS path**: `vendor/ghostty/src/apprt/runtime.zig` offers
+only `.none` and `.gtk` for executables, and its own comment says macOS uses
+Xcode against libghostty. So macOS Roost = **Swift/AppKit shell + libghostty +
+our `core/` as a static lib behind a C ABI** (Ghostty already ships the
+`include/ghostty.h` + `module.modulemap` pattern to copy). User confirmed they
+have a Mac and want Roost usable on both — but explicitly **not** session
+sharing/sync between them, so the two installs stay independent.
+
+**Explicit non-goal:** herdr's detach / remote / SSH. That works because herdr
+streams cells from a server; Roost's whole value is in-process GPU surfaces.
+Can't have both — don't chase it.
+
 - **Rename → "Roost" + dedicated app id (2026-06-23):** binary, source dir (`src/roost/` + `src/main_roost.zig`), build step (`zig build roost`), env vars (`ROOST_SOCK` / `ROOST_PROJECT` / `ROOST_AGENT`), IPC socket (`roost-<pid>.sock`), and XDG dir (`<config>/roost/`) all renamed from "myterm". Dedicated GTK app id **`dev.scottzirkel.Roost`** is forced in-process via `injectAppId` (src/roost/app.zig): it prepends `--class=<id>` to `std.os.argv` BEFORE apprt loads config — additive (no Ghostty-source edit), and a valid `class` is used verbatim, so debug + release share the id (no `-debug` suffix). `launchedFromDesktop` keys off an env var, not argv, so desktop detection is undisturbed. Launcher reinstalled as `roost.desktop` (StartupWMClass `dev.scottzirkel.Roost`); live `~/.claude/settings.json` hooks repointed to `scripts/roost-notify`; `~/.config/myterm` migrated to `~/.config/roost` (layouts/recents preserved). Gate branch renamed `myterm`→`roost`. **NOTE:** the project dir is now `/home/scott/projects/roost` (renamed + memory migrated 2026-06-23 — see Naming / repo). **Icon: DONE** 2026-06-29 (`429c021`) — ghost-bird asset installed (see the Roost-icon item under Older deferred). **App-id runtime-verified on a live display 2026-06-29** — `hyprctl clients` showed `class`/`initialClass` = `dev.scottzirkel.Roost` for a launched instance.
 - **Phase 0–2:** real Ghostty `Surface` panes in our own GtkApplicationWindow; free-form role-typed pane **tree** (split/add-by-role/close/reset-to-default), layout **persisted** & restored (per-project as of 3c — see below), keyboard nav.
 - **3a:** scratchpad selection/line → Agent pane (`Ctrl+Enter`).
