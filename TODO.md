@@ -8,7 +8,39 @@ Roost is a GTK4 "agent command center" for Omarchy/Hyprland — a focused clone 
 
 ## Status — DONE & verified
 
-### ▶ Agent-state detection + portable core (2026-07-29 — built, live-verified, UNCOMMITTED)
+### ▶ Project name in agent notifications (2026-07-29 — user-verified, committed)
+With several Roost windows open, the notification popup was the one place Roost
+spoke with no window attached: the title was a fixed `Agent needs you` /
+`Agent finished`, the body was the agent's own message, and nothing said WHICH
+project. The sound doesn't disambiguate either — it encodes the event
+(`message` for needs-input, `complete` for done), not the window.
+
+`ipc.Server` gained `project: ?*const Project` + a `title_buf`, and `notify`
+now composes `"<project> — <title>"` via `titled()`. Notes:
+- **A pointer to `AppContext.current`, not a copied name.** `rebuildWorkspace`
+  reassigns that field in place, so a project switch re-points notifications
+  for free. (Verified by construction — app.zig ~1528 deinit-then-assign — not
+  by a live switch.)
+- **Wired in `run` after the AppContext is built, not at `Server.init`** — the
+  server is created ~25 lines earlier, before the AppContext exists. Hence
+  optional, defaulting null → unprefixed title.
+- **`title_buf` is a Server field, not a local** — `titled` returns a slice of
+  it, which would dangle from a stack buffer. Main-loop-only, so one shared
+  buffer is safe. Overflow and the empty-path sentinel Project both fall back
+  to the bare title.
+- **Verified live via `dbus-monitor`** against a throwaway instance in a project
+  named `acme-checkout`: `Notify` carried `"acme-checkout — Agent needs you"` /
+  `"acme-checkout — Agent finished"`. User confirmed the popup looked good.
+
+**Still open (deliberately deferred, user scoped this change to the name only):**
+every notification is sent with the fixed id `roost-agent`, and gio replaces a
+notification when a newer one reuses its id — across ALL Roost windows, since
+they share the app id. So if two projects need you at once, the second may
+erase the first. Unverified (depends on the daemon; mako here). Fix would be a
+per-window id, e.g. `roost-agent-<pid>`. **Also not done:** the wired-actions
+popup (`notifyApp` id `roost-action`, app.zig ~2295) still has no project name.
+
+### ▶ Agent-state detection + portable core (2026-07-29 — built, live-verified, committed `501d4df`)
 Prompted by a comparison against **herdr** (`github.com/ogulcancelik/herdr`, Rust
 TUI agent multiplexer, Apache-2.0) — the two ideas worth taking were its
 hook-or-scrape agent detection and its control API. Detection is done; the

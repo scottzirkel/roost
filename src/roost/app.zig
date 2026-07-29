@@ -397,6 +397,12 @@ pub fn run() !void {
     defer if (app_ctx.current.path.len > 0) app_ctx.current.deinit();
     defer actions.freeActions(app_ctx.alloc, app_ctx.actions);
 
+    // Name this window's project in its agent notifications. Wired here rather
+    // than at `server.init` (above) because the AppContext doesn't exist yet at
+    // that point. A pointer to the field — which `rebuildWorkspace` reassigns in
+    // place — so switching projects re-points the notifications with it.
+    if (have_server) server.project = &app_ctx.current;
+
     // 6.5 Agent-state detection. Polls every live agent pane's visible screen so
     //     un-hooked agents (and any agent that isn't Claude) still get a live
     //     badge. Panes driven by the `ROOST_SOCK` hooks opt out of this

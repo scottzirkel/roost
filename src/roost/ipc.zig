@@ -36,6 +36,7 @@ const internal_os = @import("../os/main.zig");
 const layout = @import("layout.zig");
 const Workspace = layout.Workspace;
 const Config = @import("config.zig").Config;
+const Project = @import("project.zig").Project;
 
 const log = std.log.scoped(.roost_ipc);
 
@@ -73,6 +74,20 @@ pub const Server = struct {
     workspace: *Workspace,
     /// User settings, for the audio-notifications toggle.
     config: *Config,
+    /// The window's current project, for naming the window in notifications.
+    /// A POINTER to the live `AppContext.current` (not a copied name) so a
+    /// project switch re-points the notifications with it — the field is
+    /// reassigned in place, so this never goes stale.
+    ///
+    /// Null until `run` wires it: the server is initialized before the
+    /// AppContext exists, and a notification without a name is better than no
+    /// notification, so this stays optional rather than a required init arg.
+    project: ?*const Project = null,
+    /// Scratch for composing the prefixed notification title. A field, not a
+    /// local: `titled` returns a slice of it, which would dangle if it lived in
+    /// that function's frame. Only ever touched on the main loop (GLib delivers
+    /// socket reads there), so a single shared buffer is safe.
+    title_buf: [512]u8 = undefined,
     /// Owned socket path (heap); unlinked + freed on `deinit`.
     path: [:0]u8,
     /// The listening service. Started on `init`; stopped/freed on `deinit`.
@@ -251,8 +266,29 @@ pub const Server = struct {
     /// `gio.Notification`, set body + themed icon, send via the GApplication.
     /// Delegates to the shared `notifyApp` (the wired-actions runner uses it too)
     /// with the stable id "roost-agent" so a newer agent event REPLACES the old.
+    ///
+    /// The title is prefixed with the project name ("roost — Agent needs you"),
+    /// because the popup is the one place Roost speaks to you with no window
+    /// attached: with several Roost windows open, "Agent needs you" alone can't
+    /// tell you WHICH agent, and the sound can't either (it encodes the event,
+    /// not the project). Name first so it survives a daemon's title truncation.
     fn notify(self: *Server, title: [:0]const u8, body: []const u8) void {
-        notifyApp(self.app.as(gio.Application), "roost-agent", title, body);
+        notifyApp(self.app.as(gio.Application), "roost-agent", self.titled(title), body);
+    }
+
+    /// `"<project> — <title>"`, or `title` unchanged when there's no usable
+    /// name — an unwired project pointer, or the empty-path sentinel Project
+    /// that stands in when resolution failed. Falls back to `title` on overflow
+    /// too: a plain notification beats a truncated one, and beats none at all.
+    ///
+    /// Returns a slice of `self.title_buf` (not the stack) so the result stays
+    /// alive for the caller's `notifyApp` — gio copies the title out of it
+    /// during that call, and nothing retains it after.
+    fn titled(self: *Server, title: [:0]const u8) [:0]const u8 {
+        const p = self.project orelse return title;
+        const name = p.displayName();
+        if (name.len == 0) return title;
+        return std.fmt.bufPrintZ(&self.title_buf, "{s} — {s}", .{ name, title }) catch title;
     }
 
     /// Play a freedesktop event sound (e.g. `complete`, `message`) when the
