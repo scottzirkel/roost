@@ -21,6 +21,10 @@ if [ ! -e "$sub/build.zig" ]; then
   git -C "$root" submodule update --init vendor/ghostty
 fi
 
+# 1.5 Core purity gate — src/roost/core/ must stay toolkit-free so it can be
+#     shared with a future non-GTK (macOS) shell. Cheap, so it runs every build.
+"$root/scripts/check-core.sh"
+
 # 2. Overlay our additive source into the Ghostty tree (symlinks = live edits:
 #    edit src/roost/* here, rebuild, done — no copy step).
 rm -rf "$sub/src/roost" "$sub/src/main_roost.zig"

@@ -38,6 +38,7 @@ const ipc = @import("ipc.zig");
 const git = @import("git.zig");
 const actions = @import("actions.zig");
 const ansi = @import("ansi.zig");
+const detect = @import("core/agent_detect.zig");
 
 const log = std.log.scoped(.roost);
 
@@ -85,7 +86,22 @@ const AppContext = struct {
     /// its `closed` signal). Held so in-dialog row handlers can post a toast back
     /// to it. null whenever Settings is closed.
     settings_dialog: ?*adw.PreferencesDialog = null,
+    /// The attention state currently reflected in the window title. Held so the
+    /// timer only touches the title when the rollup actually changes.
+    title_attention: tree.DetectState = .unknown,
+    /// The agent-detection poll timer (glib source id, 0 = none). Removed on
+    /// teardown so it can't fire against a freed workspace.
+    detect_source: c_uint = 0,
 };
+
+/// How often live agent panes are re-read for state changes.
+///
+/// 600ms is a deliberate compromise: fast enough that a permission prompt lights
+/// up the badge while you're still looking at the window, slow enough that the
+/// per-poll cost (a bounded visible-screen copy per live agent pane) stays
+/// invisible. Detection is a fallback for un-hooked agents — hooked panes skip
+/// the work entirely — so it does not need to be instant.
+const detect_interval_ms: c_uint = 600;
 
 /// Whether our custom event loop should keep running. Module-level because the
 /// GTK signal handlers / GActions are C callbacks and flipping a global is the
@@ -380,6 +396,17 @@ pub fn run() !void {
     };
     defer if (app_ctx.current.path.len > 0) app_ctx.current.deinit();
     defer actions.freeActions(app_ctx.alloc, app_ctx.actions);
+
+    // 6.5 Agent-state detection. Polls every live agent pane's visible screen so
+    //     un-hooked agents (and any agent that isn't Claude) still get a live
+    //     badge. Panes driven by the `ROOST_SOCK` hooks opt out of this
+    //     automatically — see `Tree.pollLeaf`. Removed below so the callback can
+    //     never fire against a freed workspace/context.
+    app_ctx.detect_source = glib.timeoutAdd(detect_interval_ms, onDetectTick, &app_ctx);
+    defer if (app_ctx.detect_source != 0) {
+        _ = glib.Source.remove(app_ctx.detect_source);
+        app_ctx.detect_source = 0;
+    };
 
     // 7. Wire close affordances so nothing is dead.
     //
@@ -1320,6 +1347,59 @@ fn setWindowTitle(alloc: std.mem.Allocator, window: *gtk.ApplicationWindow, p: ?
     else
         std.fmt.bufPrintZ(&buf, "Roost — {s}", .{name}) catch null;
     win.setTitle(title orelse "Roost");
+}
+
+// --- Agent-state detection -------------------------------------------------
+
+/// The window-title prefix for a rolled-up agent state. Deliberately the same
+/// glyphs as the per-pane badges, so the taskbar entry and the pane header read
+/// as one vocabulary.
+fn attentionPrefix(attn: tree.DetectState) []const u8 {
+    return switch (attn) {
+        .blocked => "🔔 ",
+        .done => "✓ ",
+        .working => "● ",
+        .idle, .unknown => "",
+    };
+}
+
+/// Drop a previously-applied prefix so re-composing is idempotent. Reading the
+/// prefix back off the live title (rather than caching a base string) keeps this
+/// correct no matter which code path last set the title — project switch,
+/// worktree switch, startup — without any of them having to know about it.
+fn stripAttentionPrefix(title: []const u8) []const u8 {
+    inline for (.{ "🔔 ", "✓ ", "● " }) |p| {
+        if (std.mem.startsWith(u8, title, p)) return title[p.len..];
+    }
+    return title;
+}
+
+/// Reflect the highest-attention agent state across all panes in the window
+/// title, so a Roost window that needs you is identifiable from the taskbar
+/// without focusing it. No-op unless the rollup changed.
+fn applyAttention(ctx: *AppContext) void {
+    const attn = ctx.workspace.agentAttention();
+    if (attn == ctx.title_attention) return;
+    ctx.title_attention = attn;
+
+    const win = ctx.window.as(gtk.Window);
+    const current = win.getTitle() orelse return;
+    const base = stripAttentionPrefix(std.mem.span(current));
+
+    // Composed on the stack BEFORE setTitle, so `base` (which borrows the
+    // window's current title storage) is never read after setTitle frees it.
+    var buf: [std.fs.max_path_bytes + 96]u8 = undefined;
+    const next = std.fmt.bufPrintZ(&buf, "{s}{s}", .{ attentionPrefix(attn), base }) catch return;
+    win.setTitle(next);
+}
+
+/// Detection timer tick: re-read every live agent pane, then roll the result up
+/// into the window title. Runs until the window is torn down.
+fn onDetectTick(data: ?*anyopaque) callconv(.c) c_int {
+    const ctx: *AppContext = @ptrCast(@alignCast(data orelse return 0));
+    ctx.workspace.pollAgents();
+    applyAttention(ctx);
+    return 1; // G_SOURCE_CONTINUE
 }
 
 /// Open a GTK directory chooser (the chooser's "Open Folder…" action). When the

@@ -30,6 +30,7 @@ const terminal_pane = @import("terminal_pane.zig");
 const TerminalPane = terminal_pane.TerminalPane;
 const ScratchpadPane = @import("scratchpad_pane.zig").ScratchpadPane;
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
+const detect = @import("core/agent_detect.zig");
 
 const log = std.log.scoped(.roost_tree);
 
@@ -104,6 +105,10 @@ pub const Role = enum {
     }
 };
 
+/// Re-export so `layout.zig` / `app.zig` can name the detected state without
+/// each of them importing `core/agent_detect.zig` directly.
+pub const DetectState = detect.State;
+
 /// The agent's lifecycle state, reflected in the Agent pane's header badge.
 /// `idle` is the resting state (plain "Agent"); the others are driven by IPC
 /// events from the running agent (see ipc.zig).
@@ -120,6 +125,29 @@ pub const AgentStatus = enum {
             .working => "Agent — ● working",
             .needs_input => "Agent — 🔔 needs you",
             .done => "Agent — ✓ done",
+        };
+    }
+
+    /// The UI status for a detected state, or null when detection was
+    /// inconclusive (`.unknown`) and the badge should be left alone.
+    fn fromDetect(s: detect.State) ?AgentStatus {
+        return switch (s) {
+            .unknown => null,
+            .idle => .idle,
+            .working => .working,
+            .blocked => .needs_input,
+            .done => .done,
+        };
+    }
+
+    /// The detected state this status corresponds to, so hook-reported events
+    /// can be fed into the same per-pane tracker that scraping drives.
+    fn toDetect(self: AgentStatus) detect.State {
+        return switch (self) {
+            .idle => .idle,
+            .working => .working,
+            .needs_input => .blocked,
+            .done => .done,
         };
     }
 };
@@ -173,6 +201,15 @@ pub const ScratchCfg = struct {
 pub const Leaf = struct {
     role: Role,
     pane: Pane,
+    /// Agent-state tracking for an Agent-role leaf. Per-leaf (not per-tree) so
+    /// several agents can run side by side, each with its own badge — the state
+    /// of one agent says nothing about the others. Left at its default for
+    /// every other role; only agent leaves are ever polled.
+    agent: detect.Tracker = .{},
+    /// The ruleset used to read this pane's screen, chosen from its launch
+    /// command. Stored per-leaf rather than per-tree so panes running different
+    /// agent CLIs can coexist.
+    manifest: *const detect.Manifest = &detect.generic,
     /// The vertical box holding [header label, pane content]. This is the
     /// widget parented into the tree (so it can be reparented as a unit).
     box: *gtk.Box,
@@ -397,7 +434,19 @@ pub const Tree = struct {
         }
 
         const lb = labeledBox(role, pane.widget());
-        node.* = .{ .leaf = .{ .role = role, .pane = pane, .box = lb.box, .label = lb.label } };
+        node.* = .{ .leaf = .{
+            .role = role,
+            .pane = pane,
+            .box = lb.box,
+            .label = lb.label,
+            // Pick the detection ruleset from the command this pane actually
+            // launches. Unrecognised agents fall back to `generic`, which still
+            // catches a spinner and a y/n prompt — so a badge is never dead.
+            .manifest = if (role == .agent)
+                detect.manifestFor(self.agent_cmd orelse "")
+            else
+                &detect.generic,
+        } };
         // Autosave wiring needs the pane's FINAL address (it was moved into the
         // node above), so connect the scratchpad's `changed` handler here.
         if (node.leaf.pane == .scratchpad) node.leaf.pane.scratchpad.wire();
@@ -841,9 +890,86 @@ pub const Tree = struct {
     /// Update the FIRST agent-role leaf's header label to reflect `status`.
     /// No-op if there is no agent pane. Used by the IPC server when the agent
     /// reports progress (done / needs-input / working).
+    ///
+    /// The event is recorded on that leaf's tracker, not just painted on the
+    /// label: `report` marks the pane as hook-driven, which permanently stops
+    /// screen scraping from second-guessing it. An agent that tells us what
+    /// it's doing always outranks us reading its footer.
+    ///
+    /// NOTE: hook events still address the *first* agent pane, because the
+    /// `ROOST_SOCK` protocol has no pane identity yet. Additional agent panes
+    /// are driven by detection until it does.
     pub fn setAgentStatus(self: *Tree, status: AgentStatus) void {
-        const leaf = self.firstLeafOfRole(.agent) orelse return;
-        leaf.leaf.label.setText(status.badge());
+        const node = self.firstLeafOfRole(.agent) orelse return;
+        node.leaf.agent.report(status.toDetect());
+        node.leaf.label.setText(status.badge());
+    }
+
+    /// Poll every live agent pane's screen and update its badge.
+    ///
+    /// Called on a timer from app.zig. Cheap by construction: panes that are
+    /// hook-driven or have no running child are skipped outright, and the
+    /// capture is bounded to the visible screen (`captureScreen`, not
+    /// `captureText`), so cost tracks window size rather than scrollback depth.
+    pub fn pollAgents(self: *Tree) void {
+        self.pollWalk(self.root);
+    }
+
+    fn pollWalk(self: *Tree, node: *Node) void {
+        switch (node.*) {
+            .split => |*s| {
+                self.pollWalk(s.start);
+                self.pollWalk(s.end);
+            },
+            .leaf => |*l| self.pollLeaf(l),
+        }
+    }
+
+    fn pollLeaf(self: *Tree, leaf: *Leaf) void {
+        if (leaf.role != .agent) return;
+        // Hooks own this pane; scraping would only add flicker.
+        if (leaf.agent.hooked) return;
+        const term = switch (leaf.pane) {
+            .terminal => |*t| t,
+            .scratchpad => return,
+        };
+        // Nothing running: leave the badge as-is (the pane auto-closes on exit).
+        if (!term.hasLiveProcess()) return;
+
+        const screen = term.captureScreen(self.alloc) orelse return;
+        defer self.alloc.free(screen);
+
+        const changed = leaf.agent.observe(leaf.manifest, .{
+            .screen = screen,
+            .title = term.title() orelse "",
+        });
+        if (!changed) return;
+        if (AgentStatus.fromDetect(leaf.agent.state)) |status| {
+            leaf.label.setText(status.badge());
+        }
+    }
+
+    /// The state across all agent panes that most wants the user's attention
+    /// (blocked > done > working > idle). `.unknown` when there are no agent
+    /// panes at all. Drives the window-title rollup so a Roost window that
+    /// needs you says so from the taskbar.
+    pub fn agentAttention(self: *Tree) detect.State {
+        var best: detect.State = .unknown;
+        attentionWalk(self.root, &best);
+        return best;
+    }
+
+    fn attentionWalk(node: *Node, best: *detect.State) void {
+        switch (node.*) {
+            .split => |*s| {
+                attentionWalk(s.start, best);
+                attentionWalk(s.end, best);
+            },
+            .leaf => |*l| {
+                if (l.role != .agent) return;
+                if (l.agent.state.attention() > best.attention()) best.* = l.agent.state;
+            },
+        }
     }
 
     /// First leaf (tree order) whose role matches `role`, or null.

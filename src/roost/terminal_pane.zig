@@ -18,6 +18,7 @@ const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const Application = @import("../apprt/gtk/class/application.zig").Application;
 const CoreSurface = @import("../Surface.zig");
 const apprt = @import("../apprt.zig");
+const terminal = @import("../terminal/main.zig");
 
 const gtk = @import("gtk");
 const gobject = @import("gobject");
@@ -114,6 +115,26 @@ pub const TerminalPane = union(enum) {
     pub fn captureText(self: *TerminalPane, alloc: std.mem.Allocator) ?[:0]const u8 {
         switch (self.*) {
             inline else => |*b| return b.captureText(alloc),
+        }
+    }
+
+    /// Capture only the pane's *visible* screen (no scrollback) as owned text,
+    /// or null if unavailable. Caller frees with `alloc.free`.
+    ///
+    /// Distinct from `captureText` on purpose: agent-state detection polls this
+    /// on a timer for every live agent pane, so it must stay proportional to the
+    /// window, not to however many thousand lines of scrollback have piled up.
+    pub fn captureScreen(self: *TerminalPane, alloc: std.mem.Allocator) ?[:0]const u8 {
+        switch (self.*) {
+            inline else => |*b| return b.captureScreen(alloc),
+        }
+    }
+
+    /// The pane's current OSC-set title, or null if the program hasn't set one.
+    /// Borrowed from the surface — copy it if you need it past this call.
+    pub fn title(self: *TerminalPane) ?[:0]const u8 {
+        switch (self.*) {
+            inline else => |*b| return b.title(),
         }
     }
 
@@ -272,6 +293,26 @@ pub const GhosttyTerminalPane = struct {
         const screen = core.io.terminal.screens.active; // *Screen
         const sel = screen.selectAll() orelse return null; // empty screen
         return screen.selectionString(alloc, .{ .sel = sel, .trim = true }) catch return null;
+    }
+
+    /// Capture only the active (visible) area. Same read path as `captureText`
+    /// — renderer mutex, selection, stringify — but the selection is pinned to
+    /// the `.active` tag instead of `selectAll()`, so the cost is bounded by the
+    /// window height rather than the scrollback depth. Null if the surface isn't
+    /// realized or the active area is empty.
+    fn captureScreen(self: *GhosttyTerminalPane, alloc: std.mem.Allocator) ?[:0]const u8 {
+        const core = self.surface.core() orelse return null;
+        core.renderer_state.mutex.lock();
+        defer core.renderer_state.mutex.unlock();
+        const screen = core.io.terminal.screens.active; // *Screen
+        const tl = screen.pages.getTopLeft(.active);
+        const br = screen.pages.getBottomRight(.active) orelse return null;
+        const sel = terminal.Selection.init(tl, br, false);
+        return screen.selectionString(alloc, .{ .sel = sel, .trim = true }) catch return null;
+    }
+
+    fn title(self: *GhosttyTerminalPane) ?[:0]const u8 {
+        return self.surface.getTitle();
     }
 
     fn setTheme(self: *GhosttyTerminalPane) void {

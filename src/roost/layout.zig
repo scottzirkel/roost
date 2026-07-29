@@ -213,6 +213,18 @@ pub const Workspace = struct {
         self.t.setAgentStatus(status);
     }
 
+    /// Poll every live agent pane's screen and refresh its badge. Driven by a
+    /// timer in app.zig; see `Tree.pollAgents`.
+    pub fn pollAgents(self: *Workspace) void {
+        self.t.pollAgents();
+    }
+
+    /// The most attention-worthy state across all agent panes, for the window-
+    /// title rollup. See `Tree.agentAttention`.
+    pub fn agentAttention(self: *Workspace) tree.DetectState {
+        return self.t.agentAttention();
+    }
+
     /// Route wired-action output into the first pane of `role` (agent/shell →
     /// terminal injection; scratchpad → append). Returns true if delivered.
     pub fn routeToRole(self: *Workspace, role: tree.Role, bytes: []const u8) bool {
