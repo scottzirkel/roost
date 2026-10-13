@@ -79,6 +79,9 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
   [Omarchy](https://omarchy.org) / Hyprland; any GTK4 + Wayland setup should
   work.
 - **GTK4 + libadwaita** (Ghostty's runtime deps).
+- **fontconfig, FreeType, HarfBuzz, libpng and zlib** from your system. Any
+  GTK4 desktop already has them. Roost links these instead of Ghostty's bundled
+  copies, so it shares one copy of each with GTK.
 - **[Zig](https://ziglang.org) 0.15.2** to build.
 - Optional but recommended: **[lazygit](https://github.com/jesseduffield/lazygit)**
   (Git pane) and **[Claude Code](https://claude.com/claude-code)** (`claude`, the
@@ -199,7 +202,9 @@ build is a clean overlay. `./build.sh`:
 2. symlinks `src/roost/` + `src/main_roost.zig` into `vendor/ghostty/src/`,
 3. applies `patches/build.zig.patch` — the one additive change, which registers
    the `roost` executable, and
-4. runs `zig build roost`.
+4. runs `zig build roost`, linking the system's font and image libraries
+   (`-fsys=fontconfig` and friends) so Roost never carries a second copy of a
+   library GTK already loads.
 
 The diff against upstream Ghostty is *only* our own files plus that one build
 step.

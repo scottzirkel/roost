@@ -8,6 +8,42 @@ Roost is a GTK4 "agent command center" for Omarchy/Hyprland — a focused clone 
 
 ## Status — DONE & verified
 
+### ▶ Crash on font upgrades fixed — link system font libraries (2026-10-13 — built, isolated-tested, installed, committed; NOT yet user-verified)
+A system update that upgraded font packages crashed three Roost windows
+(15:02–15:04, all SIGSEGV → abort). Every stack was the same: GTK's settings
+listener saw the portal's `org.gnome.fontconfig serial` change and called
+`FcInitReinitialize` → `FcConfigDestroy` → `FcFontSetDestroy` →
+`FcPatternDestroy`, which read freed memory.
+
+**Cause:** Ghostty's build bundles its own fontconfig (2.14.2), FreeType,
+HarfBuzz, libpng and zlib unless told otherwise. GTK and Pango still load the
+system copies (fontconfig 2.18.3), so Roost carried two copies of each. The
+linker exported the 27 bundled `Fc*` functions that GTK/Pango call, so those
+calls went to the bundled copy while every other `Fc*` call went to the system
+one. Font objects made by one copy were freed by the other. The bundled 2.14
+also can't parse the system's 2.18 config files: 630 "invalid constant"
+warnings in a 30-second run.
+
+**Fix:** `build.sh` now passes `-fsys=fontconfig -fsys=freetype -fsys=harfbuzz
+-fsys=libpng -fsys=zlib`, matching Arch's own `ghostty` package. It's a build
+flag, so `vendor/ghostty` stays zero-diff. The README requirements mention the
+five libraries.
+
+**Verified (isolated test instance):** private D-Bus session + a fake
+Settings portal, private font dir/cache/config, window parked on a hidden
+Hyprland special workspace. Each round replaced the fonts on disk, ran
+`fc-cache -f` and sent `SettingChanged`. New build: 5/5 rounds survived, and an
+`LD_PRELOAD` shim confirmed 5/5 `FcInitReinitialize` calls ran and succeeded.
+Bundled `Fc*`/`FT_*`/`hb_*` symbols: 0 (were 160 FreeType, 518 HarfBuzz).
+Same font faces load as before.
+
+**Not reproduced:** the old build also survived the same 5 rounds in a fresh
+instance. That fits the cause: the mixed copies drift only after hours of
+normal font use, which is why the long-running windows crashed and a window
+opened at 15:03 did not. So "fixed" rests on the stack trace plus removing the
+duplicate libraries, not on a failing-then-passing test. Running windows keep
+the old code until relaunched.
+
 ### ▶ Project name in agent notifications (2026-07-29 — user-verified, committed)
 With several Roost windows open, the notification popup was the one place Roost
 spoke with no window attached: the title was a fixed `Agent needs you` /

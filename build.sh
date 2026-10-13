@@ -43,7 +43,16 @@ glib-compile-resources \
   --target="$root/src/roost/icons.gresource" \
   "$root/src/roost/icons/roost-icons.gresource.xml"
 
+# 3.6 Link the system's font and image libraries, never Ghostty's bundled ones.
+#     GTK and Pango always load the system fontconfig/freetype/harfbuzz/libpng/
+#     zlib. A bundled copy alongside them leaves two versions in one process,
+#     and calls cross between the copies. When fonts change on disk (a font
+#     package upgrade), GTK reloads fontconfig and Roost segfaults in
+#     FcPatternDestroy. Arch's own ghostty package links all five from the
+#     system. Passed before "$@", so a later -fno-sys=<name> still overrides.
+sys_libs=(-fsys=fontconfig -fsys=freetype -fsys=harfbuzz -fsys=libpng -fsys=zlib)
+
 # 4. Build. Extra args pass through (e.g. ./build.sh -Doptimize=ReleaseFast).
-echo "==> $ZIG build roost"
-( cd "$sub" && "$ZIG" build roost "$@" )
+echo "==> $ZIG build roost ${sys_libs[*]}"
+( cd "$sub" && "$ZIG" build roost "${sys_libs[@]}" "$@" )
 echo "==> built: $sub/zig-out/bin/roost"
