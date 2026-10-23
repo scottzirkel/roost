@@ -19,8 +19,9 @@ the task needs:
   by PID.
 - Test running behavior in an isolated instance, never in live windows. See
   [Isolated test instances](docs/development.md#isolated-test-instances).
-- Build with `./build.sh`. Use `-p <dir>` for a scratch build that leaves the
-  installed binary alone.
+- Build with `./build.sh`, which makes a ReleaseSafe build. For testing, use
+  `./build.sh -p <dir> -Doptimize=Debug`: a scratch build with debug logs that
+  leaves the installed binary alone.
 - Keep the docs current as you work. Update `ROADMAP.md` when you finish or add
   planned work, and `docs/` when a design or gotcha changes. History goes in
   commit messages, not in docs.

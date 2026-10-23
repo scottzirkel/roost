@@ -5,41 +5,7 @@ things work lives in [docs/architecture.md](docs/architecture.md).
 
 Last updated 2026-10-23.
 
-## Now: make silent breakage loud
-
-In 2026 two things broke quietly for months: the hooks never reported
-"working", and Claude Code changed its spinner, so a busy agent looked idle.
-This step makes that kind of breakage visible.
-
-- [x] A GitHub Action runs the unit tests and `scripts/check-core.sh` on every
-      push.
-- [x] Settings shows whether the Claude Code hooks are installed and complete,
-      with a button that adds missing ones after asking.
-- [x] Roost warns once when installed hooks don't run: one hook stays silent
-      while the others report, or the screen shows Claude finishing turns that
-      no hook reported.
-- [ ] Decide between debug and release builds for daily use. Debug builds are
-      slower but log more; see
-      [build modes](docs/development.md#build-modes).
-
-The one gap left is a change in how an agent's screen looks. CI replays saved
-screens, so it can't see a new Claude Code release; re-probe after updates (see
-[probing an agent CLI](docs/development.md#probing-an-agent-cli)).
-
-## Soon: keep the agent's conversation across a reload
-
-Reload (`Ctrl+Shift+Q`) restarts every pane, so a running Claude Code session
-ends, and you have to find it again with `/resume`.
-
-- [ ] Remember each Agent pane's Claude session. Every hook payload carries a
-      `session_id`, so `roost-notify` can send it along with the hook name
-      (a new `ROOST_PROTOCOL` version), and Roost saves it with the layout.
-- [ ] After a reload, start that pane's agent with `claude --resume <id>`, so
-      the conversation picks up where it was.
-- [ ] Do this only for reload. A new window, or reopening a project after
-      quitting, still starts a fresh session.
-
-## Next: a Waybar indicator
+## Now: a Waybar indicator
 
 See every window's agent state from the bar, and jump to the window that needs
 you.
@@ -53,7 +19,7 @@ you.
 This is the first slice of the control API below: the same socket and the same
 message format.
 
-## Then: the control API
+## Next: the control API
 
 A `roost` command that the agent, or you, can run inside a pane to drive its
 window:
@@ -88,6 +54,11 @@ This needs a Mac in the loop for building and testing, or a macOS CI runner.
 
 ## Known issues
 
+- **A change in how an agent's screen looks goes unnoticed.** The hook
+  checks catch hooks that stop running, and CI replays saved screens, so
+  neither sees a new Claude Code release change its spinner or prompts.
+  Re-probe after updates; see
+  [probing an agent CLI](docs/development.md#probing-an-agent-cli).
 - **Closing a pane can crash Roost on NVIDIA.** The crash happens while GTK
   frees a terminal's GL texture, inside the NVIDIA driver. Vanilla Ghostty
   crashes the same way

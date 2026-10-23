@@ -18,9 +18,8 @@ How to build, test and debug Roost. For how it's designed, see
 ## Build
 
 ```sh
-./build.sh                    # -> vendor/ghostty/zig-out/bin/roost
-./build.sh -p /tmp/roost-test # scratch install; leaves the main binary alone
-./build.sh -Doptimize=ReleaseFast
+./build.sh                                      # release build -> vendor/ghostty/zig-out/bin/roost
+./build.sh -p /tmp/roost-test -Doptimize=Debug  # scratch debug build; leaves the main binary alone
 ```
 
 `build.sh`:
@@ -37,11 +36,19 @@ symlinks. The submodule shows as dirty after a build, which is expected.
 
 ### Build modes
 
-A plain `./build.sh` makes a **debug** build. It's noticeably slower, and it
-prints `log.debug` lines to stderr, which most of the debugging below relies on.
-A release build (`-Doptimize=ReleaseFast`) is fast but keeps only info-level
-logs and above. The daily-use binary has so far been a debug build; the
-[roadmap](../ROADMAP.md) has this as an open decision.
+A plain `./build.sh` makes a **ReleaseSafe** build, for daily use. It's fast,
+and a bug in Roost still stops with a panic and a stack trace instead of
+quietly corrupting memory, which ReleaseFast would allow. It logs at info
+level and above.
+
+Pass `-Doptimize=Debug` for a **debug** build. It's noticeably slower, but it
+prints `log.debug` lines to stderr, which most of the debugging below relies
+on, so test instances use one. Any `-Doptimize=` you pass replaces the
+default.
+
+A window started from the desktop launcher sends its stderr to `/dev/null`,
+so its logs are gone whatever the mode. Run the binary from a terminal to see
+them.
 
 ### Picking up a new build
 
@@ -57,7 +64,7 @@ Run these before committing:
 ```sh
 scripts/test.sh                                  # core check + every unit test
 git -C vendor/ghostty diff --name-only v1.3.1    # must print only build.zig
-./build.sh -p /tmp/roost-test                    # it still compiles
+./build.sh -p /tmp/roost-test -Doptimize=Debug   # it still compiles
 ```
 
 `scripts/test.sh` runs `check-core.sh`, then `zig test` on everything in
