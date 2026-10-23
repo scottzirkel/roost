@@ -4,7 +4,7 @@
 | --- | --- |
 | [`roost-notify`](#roost-notify--agent-hooks) | Lets Claude Code's hooks tell Roost what the agent is doing. |
 | [`claude-hooks.json`](#roost-notify--agent-hooks) | The hook snippet to merge into `~/.claude/settings.json`. |
-| [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal, or runs `roost status`. |
+| [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal, or runs a command such as `roost status`. |
 | [`roost.desktop`](#roostdesktop--the-desktop-launcher) | The desktop launcher entry. |
 | [`install-omarchy-widget.sh`](#install-omarchy-widgetsh--the-omarchy-bar-widget) | Adds Roost's widget to the Omarchy bar. |
 | [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
@@ -104,7 +104,10 @@ By hand:
      Reload can resume it; the badge doesn't change. Without it, Roost learns
      the session from the next prompt, so a reload right after `/resume` starts
      a fresh conversation. Claude Code adds this hook's output to the
-     conversation, which is why `roost-notify` never prints anything.
+     conversation, so for this event `roost-notify` prints the window's short
+     note on the `roost` commands. That's how the agent learns
+     `roost scratch`. An older window has no note, and no other event prints
+     anything.
 
 ### Manual test
 
@@ -142,7 +145,7 @@ terminal.
 ln -sfn /path/to/roost/scripts/roost-launch ~/.local/bin/roost
 ```
 
-Commands such as `roost status` skip all of that: they go straight to the
+Commands such as `roost status` and `roost scratch` skip all of that: they go straight to the
 binary, open no window and close nothing, so an agent or a desktop bar can run
 them.
 

@@ -65,14 +65,14 @@ touching layout or app code.
 
 | File | What it does |
 | --- | --- |
-| `src/main_roost.zig` | Entry point: runs a `roost status` command, or starts the window. |
-| `src/roost/cli.zig` | `roost status`: finds every window's socket, asks, and prints. |
+| `src/main_roost.zig` | Entry point: runs a `roost` command, or starts the window. |
+| `src/roost/cli.zig` | `roost status` and `roost scratch`: find the window's socket, ask, and print. |
 | `src/roost/app.zig` | Startup, the window, the main loop, actions, dialogs, settings, and the wired-actions runner. |
 | `src/roost/tree.zig` | The pane tree: split, add, close, swap, resize, focus, persistence, agent polling. |
 | `src/roost/layout.zig` | `Workspace`, the thin layer between the app and the tree. |
 | `src/roost/terminal_pane.zig` | The `TerminalPane` interface and its Ghostty backend. |
 | `src/roost/scratchpad_pane.zig` | The Markdown scratchpad: live styling and autosave. |
-| `src/roost/ipc.zig` | The socket (hook messages and status requests) and desktop notifications. |
+| `src/roost/ipc.zig` | The socket (hook messages and requests) and desktop notifications. |
 | `src/roost/config.zig` | `~/.config/roost/config`, a `key = value` file. |
 | `src/roost/project.zig` | Project resolution, recent projects, and layout files. |
 | `src/roost/git.zig` | Git helpers for worktrees and branch names. |
@@ -82,7 +82,7 @@ touching layout or app code.
 | `src/roost/ansi.zig` | Strips escape sequences from action output. |
 | `src/roost/core/agent_detect.zig` | Agent-state detection from screen and title. |
 | `src/roost/core/hook_msg.zig` | Parses the hook socket's messages. |
-| `src/roost/core/control.zig` | Requests a client sends a window, and the status reply. |
+| `src/roost/core/control.zig` | Requests a client sends a window, the replies, and the agent's note on them. |
 | `src/roost/core/git_head.zig` | Reads the checked-out branch from `.git/HEAD`, without running git. |
 | `src/roost/core/claude_hooks.zig` | Checks and adds Claude Code hooks in `settings.json`, and tracks which ones run. |
 | `integrations/omarchy/` | The Omarchy bar widget: a QML plugin that reads `roost status --all --watch`. |
@@ -175,10 +175,11 @@ reading only fills the gaps.
 - Every popup uses the same notification id, but ids are tracked per process,
   so one window's popup never replaces another's.
 
-### Window status
+### Requests: status and the Scratchpad
 
-The same socket answers questions (`core/control.zig`). A client sends one
-request word, and the window replies with one line of JSON and closes.
+The same socket answers requests (`core/control.zig`). A client sends one
+line: a request word, then for some requests a JSON object with the argument.
+The window replies with one line of JSON and closes.
 
 - **`status`** returns the window's pid, project, branch and most urgent agent
   state. `roost status --all` finds every window by its
@@ -192,6 +193,19 @@ request word, and the window replies with one line of JSON and closes.
 - **Request words never collide with hook events.** An older Roost reads a
   request as an unknown event and closes without a reply, so clients list it
   with only its pid.
+- **`scratch-read` and `scratch-append`** are `roost scratch`. They act on the
+  window's first Scratchpad pane. An append adds a new paragraph at the end
+  as one undo step, and autosave writes it like typing. The text travels as
+  JSON, so its newlines stay inside the one line.
+- **A line ends at a newline, or when the client closes.** Requests send a
+  newline so they can wait for the answer; `roost-notify` just closes. Reads
+  continue until the line is complete, up to 512 KB. Hook lines are still cut
+  at 1 KB.
+- **The agent learns the commands when its conversation starts.** The
+  SessionStart hook runs `roost-notify session`, which asks the window for
+  `agent-note` and prints the reply. Claude Code adds a SessionStart hook's
+  output to the conversation. The note comes from the window, so it names only
+  what that build supports, and an older window gives none.
 - **Commands run in the window's binary.** `main` checks for a command word
   before Ghostty reads argv as config. Ghostty flags start with `-` or `+`, so
   a bare word can't be mistaken for one. `scripts/roost-launch` passes

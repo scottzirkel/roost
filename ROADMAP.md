@@ -8,17 +8,17 @@ Last updated 2026-10-23.
 ## Now: the control API
 
 More `roost` commands that the agent, or you, can run inside a pane to drive
-its window. They build on the socket and message format `roost status`
-already uses.
+its window. They build on the socket and message format that `roost status`
+and `roost scratch` already use.
 
-- `roost scratch read` and `roost scratch append "…"` read your notes and write
-  back a plan or summary.
 - `roost open path:line` jumps the Editor pane to a file and line.
 - `roost run <action> --wait` runs one of your wired actions and returns its
   exit code. It can only run actions you defined, never arbitrary commands.
 
-The agent learns the commands from a short note in the project's `CLAUDE.md`.
-The message format lives in `src/roost/core/`, so the Mac app can reuse it.
+The agent learns the commands when its conversation starts, from a note the
+window gives Claude Code's SessionStart hook (`agent_note` in
+`src/roost/core/control.zig`). Each new command gets a line there. The message
+format lives in `src/roost/core/`, so the Mac app can reuse it.
 
 ## Later: macOS
 

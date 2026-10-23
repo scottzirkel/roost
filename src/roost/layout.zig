@@ -261,6 +261,10 @@ pub const Workspace = struct {
         return self.t.captureAgentToScratchpad();
     }
 
+    pub fn scratchpad(self: *Workspace) ?*tree.ScratchpadPane {
+        return self.t.scratchpad();
+    }
+
     /// Recompute the active-pane highlight from the window's live GTK focus.
     /// Driven by the window `notify::focus-widget` handler (mouse + keyboard +
     /// programmatic focus all route through it). No-op if no window is attached.

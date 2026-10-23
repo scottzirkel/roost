@@ -5,6 +5,8 @@
 //!     roost status --all           every running window
 //!     roost status --json          one line of JSON instead of text
 //!     roost status --all --watch   JSON now and on every change, for a bar
+//!     roost scratch read           print this window's Scratchpad
+//!     roost scratch append [text]  add to it: the text, or stdin
 //!
 //! It's the same binary that runs the window: `main` offers its argv here
 //! first, and starts the window only when the first word isn't a command.
@@ -17,6 +19,18 @@
 const std = @import("std");
 const posix = std.posix;
 const control = @import("core/control.zig");
+
+const scratch_usage =
+    \\usage: roost scratch read
+    \\       roost scratch append [text...]
+    \\
+    \\Reads or adds to the Scratchpad of the Roost window this pane is in.
+    \\
+    \\  read     print the Scratchpad's Markdown
+    \\  append   add Markdown to the end, as a new paragraph: the arguments,
+    \\           or stdin when there are none. What's there stays as it is.
+    \\
+;
 
 const usage =
     \\usage: roost status [--all] [--json] [--watch]
@@ -32,6 +46,11 @@ const usage =
 
 /// How long one window gets to answer before it's reported as unknown.
 const answer_timeout_ms = 500;
+/// The same for `roost scratch`, which moves more text and has one window
+/// to wait for.
+const scratch_timeout_ms = 3000;
+/// The longest reply read: a big Scratchpad, with room to spare.
+const max_reply = 16 * 1024 * 1024;
 /// How often `--watch` asks again.
 const watch_interval_ms = 1000;
 
@@ -47,7 +66,7 @@ pub fn command() ?u8 {
 /// Keep in sync with the list in `scripts/roost-launch`, which passes these
 /// straight through instead of opening a window.
 fn isCommand(word: []const u8) bool {
-    return std.mem.eql(u8, word, "status");
+    return std.mem.eql(u8, word, "status") or std.mem.eql(u8, word, "scratch");
 }
 
 /// Run `args` (argv without the program name), printing to stdout and stderr.
@@ -57,9 +76,104 @@ pub fn run(args: []const [:0]const u8) u8 {
     var err_buf: [1024]u8 = undefined;
     var err = std.fs.File.stderr().writer(&err_buf);
     defer err.interface.flush() catch {};
-    const code = status(args[1..], &out.interface, &err.interface);
+    const code = if (std.mem.eql(u8, args[0], "scratch")) code: {
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const stdin = std.fs.File.stdin();
+        var in_buf: [4096]u8 = undefined;
+        var in = stdin.reader(&in_buf);
+        const piped = if (stdin.isTty()) null else &in.interface;
+        break :code scratch(arena.allocator(), args[1..], paneSocket(), piped, &out.interface, &err.interface);
+    } else status(args[1..], &out.interface, &err.interface);
     out.interface.flush() catch return 1;
     return code;
+}
+
+/// `roost scratch read|append` against the window at `sock` (ROOST_SOCK).
+/// `stdin` is null when it's a terminal, so `append` doesn't sit waiting.
+fn scratch(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    sock: ?[]const u8,
+    stdin: ?*std.Io.Reader,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) u8 {
+    const sub = if (args.len > 0) args[0] else "";
+    if (std.mem.eql(u8, sub, "-h") or std.mem.eql(u8, sub, "--help")) {
+        out.writeAll(scratch_usage) catch {};
+        return 0;
+    }
+    const req: control.Request = if (std.mem.eql(u8, sub, "read") and args.len == 1)
+        .scratch_read
+    else if (std.mem.eql(u8, sub, "append")) req: {
+        const text = if (args.len > 1)
+            std.mem.join(a, " ", args[1..]) catch return 1
+        else if (stdin) |in|
+            in.allocRemaining(a, .limited(control.Request.max_line)) catch |e| {
+                if (e == error.StreamTooLong)
+                    err.print("roost scratch append: that's too long. The limit is {d} KB.\n", .{control.Request.max_line / 1024}) catch {}
+                else
+                    err.writeAll("roost scratch append: couldn't read stdin.\n") catch {};
+                return 1;
+            }
+        else {
+            err.writeAll("roost scratch append: give the text as arguments, or pipe it in.\n\n") catch {};
+            err.writeAll(scratch_usage) catch {};
+            return 2;
+        };
+        if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) {
+            err.writeAll("roost scratch append: nothing to add.\n") catch {};
+            return 1;
+        }
+        if (!control.isText(text)) {
+            err.writeAll("roost scratch append: that isn't text. The Scratchpad takes UTF-8.\n") catch {};
+            return 1;
+        }
+        break :req .{ .scratch_append = text };
+    } else {
+        if (sub.len == 0)
+            err.writeAll("roost scratch: say read or append.\n\n") catch {}
+        else
+            err.print("roost scratch: unknown command '{s}'\n\n", .{std.mem.join(a, " ", args) catch sub}) catch {};
+        err.writeAll(scratch_usage) catch {};
+        return 2;
+    };
+
+    const path = sock orelse {
+        err.writeAll("roost scratch: not in a Roost pane, so there's no Scratchpad to use.\n") catch {};
+        return 1;
+    };
+    var line: std.Io.Writer.Allocating = .init(a);
+    req.write(&line.writer) catch return 1;
+    if (line.written().len > control.Request.max_line) {
+        err.print("roost scratch append: that's too long. The limit is {d} KB.\n", .{control.Request.max_line / 1024}) catch {};
+        return 1;
+    }
+
+    const raw = ask(a, path, line.written(), scratch_timeout_ms) catch |e| switch (e) {
+        error.NoWindow => {
+            err.print("roost scratch: no window answers at {s}\n", .{path}) catch {};
+            return 1;
+        },
+        else => "",
+    };
+    const reply_line = std.mem.trim(u8, raw, " \t\r\n");
+    const reply = if (reply_line.len == 0) null else control.Reply.parse(a, reply_line) catch null;
+    const r = reply orelse {
+        err.writeAll("roost scratch: the window didn't answer. If it's an older Roost build, reload it to update.\n") catch {};
+        return 1;
+    };
+    if (r.@"error") |why| {
+        err.print("roost scratch: {s}\n", .{why}) catch {};
+        return 1;
+    }
+    if (req == .scratch_read) {
+        const text = r.text orelse "";
+        out.writeAll(text) catch return 1;
+        if (text.len > 0 and text[text.len - 1] != '\n') out.writeByte('\n') catch return 1;
+    }
+    return 0;
 }
 
 const Options = struct {
@@ -115,7 +229,7 @@ fn status(args: []const [:0]const u8, out: *std.Io.Writer, err: *std.Io.Writer) 
     const a = arena.allocator();
 
     if (!o.all) {
-        const sock = posix.getenv("ROOST_SOCK") orelse {
+        const sock = paneSocket() orelse {
             err.writeAll("roost status: not in a Roost pane, so there's no window to ask.\nUse --all to ask every running window.\n") catch {};
             return 1;
         };
@@ -154,6 +268,12 @@ fn status(args: []const [:0]const u8, out: *std.Io.Writer, err: *std.Io.Writer) 
     }
 }
 
+/// The socket of the window this pane is in, from ROOST_SOCK.
+fn paneSocket() ?[]const u8 {
+    const sock = posix.getenv("ROOST_SOCK") orelse return null;
+    return if (sock.len > 0) sock else null;
+}
+
 fn socketDir() []const u8 {
     return posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
 }
@@ -188,7 +308,7 @@ fn before(_: void, x: control.Status, y: control.Status) bool {
 /// a window that died). A window that doesn't answer, or answers with
 /// something else, is reported with only its pid.
 fn askStatus(arena: std.mem.Allocator, path: []const u8, pid: i32) ?control.Status {
-    const reply = ask(arena, path, "status\n") catch |e| switch (e) {
+    const reply = ask(arena, path, "status\n", answer_timeout_ms) catch |e| switch (e) {
         error.NoWindow => return null,
         else => return .{ .pid = pid },
     };
@@ -198,21 +318,27 @@ fn askStatus(arena: std.mem.Allocator, path: []const u8, pid: i32) ?control.Stat
 }
 
 /// Send `request` to the socket at `path` and read the reply until the window
-/// closes the connection.
-fn ask(arena: std.mem.Allocator, path: []const u8, request: []const u8) ![]u8 {
+/// closes the connection. Each send and read gets `timeout_ms`.
+fn ask(arena: std.mem.Allocator, path: []const u8, request: []const u8, timeout_ms: u32) ![]u8 {
     const addr = std.net.Address.initUnix(path) catch return error.NoWindow;
     const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return error.NoWindow;
     defer posix.close(fd);
-    const timeout: posix.timeval = .{ .sec = 0, .usec = answer_timeout_ms * 1000 };
+    const timeout: posix.timeval = .{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast(timeout_ms % 1000 * 1000),
+    };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return error.NoWindow;
-    // NOSIGNAL: a window that hangs up first must not kill us with SIGPIPE.
-    _ = try posix.send(fd, request, posix.MSG.NOSIGNAL);
+    var sent: usize = 0;
+    while (sent < request.len) {
+        // NOSIGNAL: a window that hangs up first must not kill us with SIGPIPE.
+        sent += try posix.send(fd, request[sent..], posix.MSG.NOSIGNAL);
+    }
 
     var reply: std.ArrayListUnmanaged(u8) = .empty;
     var buf: [4096]u8 = undefined;
-    while (reply.items.len < 64 * 1024) {
+    while (reply.items.len < max_reply) {
         const n = try posix.read(fd, &buf);
         if (n == 0) break;
         try reply.appendSlice(arena, buf[0..n]);
@@ -266,6 +392,7 @@ test "options: flags, help, and mistakes" {
     try testing.expectEqualStrings("--al", parseOptions(&.{"--al"}).bad);
     try testing.expectEqualStrings("--watch", parseOptions(&.{"--watch"}).bad);
     try testing.expect(isCommand("status"));
+    try testing.expect(isCommand("scratch"));
     try testing.expect(!isCommand("--class=dev.scottzirkel.Roost"));
 }
 
@@ -291,14 +418,20 @@ test "text: glyphs, branches, and a window that didn't say" {
     try testing.expectEqualStrings("No Roost windows are running.\n", empty.buffered());
 }
 
-/// A pretend window: answers one connection on `fd` with `reply`, or closes
-/// without a word when `reply` is empty, the way an older Roost does.
-fn fakeWindow(fd: posix.socket_t, reply: []const u8) void {
+/// A pretend window: answers one connection on `fd` with `reply` when the
+/// request is `want`, or closes without a word when `reply` is empty, the way
+/// an older Roost does.
+fn fakeWindow(fd: posix.socket_t, want: []const u8, reply: []const u8) void {
     const conn = posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch return;
     defer posix.close(conn);
-    var buf: [64]u8 = undefined;
-    const n = posix.read(conn, &buf) catch return;
-    if (!std.mem.eql(u8, buf[0..n], "status\n")) return;
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len and std.mem.indexOfScalar(u8, buf[0..n], '\n') == null) {
+        const got = posix.read(conn, buf[n..]) catch return;
+        if (got == 0) break;
+        n += got;
+    }
+    if (!std.mem.eql(u8, buf[0..n], want)) return;
     _ = posix.write(conn, reply) catch {};
 }
 
@@ -343,9 +476,9 @@ test "collect: windows that answer, an older one, and dead sockets" {
     try tmp.dir.writeFile(.{ .sub_path = "roost-55.sock.txt", .data = "" });
 
     const threads = [_]std.Thread{
-        try .spawn(.{}, fakeWindow, .{ zed, "{\"pid\":11,\"project\":\"/z/zed\",\"name\":\"zed\",\"branch\":\"main\",\"state\":\"working\"}\n" }),
-        try .spawn(.{}, fakeWindow, .{ app, "{\"pid\":22,\"project\":\"/a/App\",\"name\":\"App\",\"branch\":\"\",\"state\":\"needs-input\"}\n" }),
-        try .spawn(.{}, fakeWindow, .{ old, "" }),
+        try .spawn(.{}, fakeWindow, .{ zed, "status\n", "{\"pid\":11,\"project\":\"/z/zed\",\"name\":\"zed\",\"branch\":\"main\",\"state\":\"working\"}\n" }),
+        try .spawn(.{}, fakeWindow, .{ app, "status\n", "{\"pid\":22,\"project\":\"/a/App\",\"name\":\"App\",\"branch\":\"\",\"state\":\"needs-input\"}\n" }),
+        try .spawn(.{}, fakeWindow, .{ old, "status\n", "" }),
     };
     defer for (threads) |t| t.join();
 
@@ -365,4 +498,88 @@ test "collect: windows that answer, an older one, and dead sockets" {
         \\{"windows":[{"pid":33,"project":"","name":"","branch":"","state":"unknown"}]}
         \\
     , w.buffered());
+}
+
+/// Run `roost scratch` with `args` against a fake window that wants `want`
+/// and answers `reply`. Returns the exit code; output lands in `out`/`err`.
+fn scratchAgainst(
+    args: []const [:0]const u8,
+    stdin: ?*std.Io.Reader,
+    want: []const u8,
+    reply: []const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) !u8 {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    if (dir.len + "/roost-1.sock".len >= 108) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try std.fs.path.join(a, &.{ dir, "roost-1.sock" });
+    const fd = try listen(path);
+    defer posix.close(fd);
+    const t = try std.Thread.spawn(.{}, fakeWindow, .{ fd, want, reply });
+    defer t.join();
+    return scratch(a, args, path, stdin, out, err);
+}
+
+test "scratch: read prints the text, ending in a newline" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [256]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    const code = try scratchAgainst(&.{"read"}, null, "scratch-read\n", "{\"text\":\"# Notes\\n\\n- one\"}\n", &out, &err);
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expectEqualStrings("# Notes\n\n- one\n", out.buffered());
+    try testing.expectEqualStrings("", err.buffered());
+}
+
+test "scratch: append sends stdin, or the arguments" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [256]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    var in: std.Io.Reader = .fixed("## Plan\n\n- ship\n");
+    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"append"}, &in, "scratch-append {\"text\":\"## Plan\\n\\n- ship\\n\"}\n", "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{ "append", "fix", "it" }, null, "scratch-append {\"text\":\"fix it\"}\n", "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqualStrings("", out.buffered());
+    try testing.expectEqualStrings("", err.buffered());
+}
+
+test "scratch: the window's error, an older window, and mistakes" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [1024]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+
+    try testing.expectEqual(@as(u8, 1), try scratchAgainst(&.{"read"}, null, "scratch-read\n", "{\"error\":\"no pad\"}\n", &out, &err));
+    try testing.expectEqualStrings("roost scratch: no pad\n", err.buffered());
+
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 1), try scratchAgainst(&.{"read"}, null, "scratch-read\n", "", &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "reload it") != null);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), scratch(a, &.{"append"}, "/nonexistent", null, &out, &err));
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), scratch(a, &.{"wipe"}, "/nonexistent", null, &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "unknown command 'wipe'") != null);
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), scratch(a, &.{ "read", "more" }, "/nonexistent", null, &out, &err));
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 1), scratch(a, &.{ "append", " " }, "/nonexistent", null, &out, &err));
+    try testing.expectEqualStrings("roost scratch append: nothing to add.\n", err.buffered());
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 1), scratch(a, &.{ "append", "caf\xe9" }, "/nonexistent", null, &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "isn't text") != null);
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 1), scratch(a, &.{"read"}, null, null, &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "not in a Roost pane") != null);
+    try testing.expectEqualStrings("", out.buffered());
 }

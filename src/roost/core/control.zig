@@ -6,9 +6,14 @@
 //! in the portable core (std-only, unit-tested standalone) so a Mac Roost can
 //! speak it too.
 //!
-//! FORMAT: the client sends one line, a request word. The window answers with
-//! one line of JSON and closes the connection.
-//!     status  ->  {"pid":1234,"project":"/home/me/app","name":"app","branch":"main","state":"needs-input"}
+//! FORMAT: the client sends one line: a request word, then for some requests
+//! a JSON object with the argument, so text with newlines still fits on one
+//! line. The window answers with one line of JSON and closes the connection.
+//!     status                         ->  {"pid":1234,"project":"/home/me/app","name":"app","branch":"main","state":"needs-input"}
+//!     scratch-read                   ->  {"text":"# Notes\n..."}
+//!     scratch-append {"text":"..."}  ->  {"ok":true}
+//!     agent-note                     ->  {"text":"You're running in a pane of a Roost window..."}
+//! A request the window can't carry out gets {"error":"..."}.
 //!
 //! Request words never collide with hook events (`core/hook_msg.zig`), so the
 //! server tries this parser first. An older Roost reads a request as an
@@ -21,18 +26,106 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// What a client can ask.
-pub const Request = enum {
+/// What a client can ask, with its argument.
+pub const Request = union(enum) {
     /// The window's project, branch and agent state, as one `Status`.
     status,
+    /// The first Scratchpad pane's text, as `Reply.text`.
+    scratch_read,
+    /// Add Markdown to the end of the scratchpad, as its own paragraph.
+    scratch_append: []const u8,
+    /// `agent_note`, as `Reply.text`, so it always matches what this window
+    /// supports. An older window doesn't answer, so it advertises nothing.
+    agent_note,
+    /// A request word whose argument doesn't parse; answered with an error.
+    invalid: []const u8,
 
-    /// The request on one line, or null when the line isn't one.
-    pub fn parse(line: []const u8) ?Request {
-        const word = std.mem.trim(u8, line, " \t\r\n");
-        if (std.mem.eql(u8, word, "status")) return .status;
-        return null;
+    /// The longest request line a window reads, to bound a scratchpad append.
+    pub const max_line = 512 * 1024;
+
+    /// The request on one line, or null when the line isn't one (it may be a
+    /// hook message). Strings live in `arena`.
+    pub fn parse(arena: Allocator, line: []const u8) ?Request {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        const sp = std.mem.indexOfScalar(u8, trimmed, ' ');
+        const word = if (sp) |i| trimmed[0..i] else trimmed;
+        const rest = if (sp) |i| std.mem.trim(u8, trimmed[i + 1 ..], " \t") else "";
+
+        if (std.mem.eql(u8, word, "scratch-append")) {
+            const Args = struct { text: []const u8 };
+            const args = std.json.parseFromSliceLeaky(Args, arena, rest, .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            }) catch return .{ .invalid = "scratch-append needs {\"text\": \"...\"}" };
+            if (!isText(args.text)) return .{ .invalid = "the text isn't valid UTF-8" };
+            return .{ .scratch_append = args.text };
+        }
+        const bare: ?Request = if (std.mem.eql(u8, word, "status"))
+            .status
+        else if (std.mem.eql(u8, word, "scratch-read"))
+            .scratch_read
+        else if (std.mem.eql(u8, word, "agent-note"))
+            .agent_note
+        else
+            null;
+        const req = bare orelse return null;
+        if (rest.len > 0) return .{ .invalid = "this request takes no argument" };
+        return req;
+    }
+
+    /// Write the request line, newline included.
+    pub fn write(self: Request, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .status => try w.writeAll("status"),
+            .scratch_read => try w.writeAll("scratch-read"),
+            .agent_note => try w.writeAll("agent-note"),
+            .scratch_append => |text| {
+                try w.writeAll("scratch-append ");
+                try std.json.Stringify.value(.{ .text = text }, .{}, w);
+            },
+            .invalid => unreachable, // only parse makes these
+        }
+        try w.writeByte('\n');
     }
 };
+
+/// True when `bytes` can go in the Scratchpad: UTF-8 without NUL bytes, which
+/// is what a GTK text buffer accepts.
+pub fn isText(bytes: []const u8) bool {
+    return std.unicode.utf8ValidateSlice(bytes) and std.mem.indexOfScalar(u8, bytes, 0) == null;
+}
+
+/// The answer to every request but `status`: one of its fields is set.
+pub const Reply = struct {
+    text: ?[]const u8 = null,
+    ok: ?bool = null,
+    @"error": ?[]const u8 = null,
+
+    /// Write the reply line, newline included.
+    pub fn write(self: Reply, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try std.json.Stringify.value(self, .{ .emit_null_optional_fields = false }, w);
+        try w.writeByte('\n');
+    }
+
+    /// Read a reply line. Allocations live in `arena`.
+    pub fn parse(arena: Allocator, line: []const u8) !Reply {
+        return std.json.parseFromSliceLeaky(Reply, arena, line, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+    }
+};
+
+/// What the agent learns about these commands when its conversation starts:
+/// Claude Code's SessionStart hook runs `roost-notify session`, which asks the
+/// window for this and prints it, and Claude Code adds a SessionStart hook's
+/// output to the conversation. It's in every conversation in Roost, so short.
+pub const agent_note =
+    \\You're running in a pane of a Roost window. The `roost` command works with the rest of the window:
+    \\- `roost scratch read` prints the user's scratchpad: their Markdown notes for this project. Read it when they mention their notes or the scratchpad.
+    \\- `roost scratch append` adds the Markdown on its stdin to the end of the scratchpad, as a new paragraph, and never changes what's already there. Use it when the user asks you to put a plan, summary or checklist in their notes, for example `roost scratch append <<'EOF'` … `EOF`.
+    \\- `roost status` prints this window's project, branch and agent state.
+;
 
 /// A window's agent state: the most urgent across its Agent panes.
 pub const State = enum {
@@ -120,13 +213,57 @@ pub fn socketPid(file_name: []const u8) ?i32 {
 
 const testing = std.testing;
 
-test "request: one word, and nothing a hook would send" {
-    try testing.expectEqual(Request.status, Request.parse("status").?);
-    try testing.expectEqual(Request.status, Request.parse(" status\n").?);
-    try testing.expectEqual(@as(?Request, null), Request.parse("done"));
-    try testing.expectEqual(@as(?Request, null), Request.parse("pane=1 status"));
-    try testing.expectEqual(@as(?Request, null), Request.parse("status now"));
-    try testing.expectEqual(@as(?Request, null), Request.parse(""));
+test "request: words, arguments, and nothing a hook would send" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expect(Request.parse(a, "status").? == .status);
+    try testing.expect(Request.parse(a, " status\n").? == .status);
+    try testing.expect(Request.parse(a, "scratch-read").? == .scratch_read);
+    try testing.expect(Request.parse(a, "agent-note").? == .agent_note);
+    try testing.expect(Request.parse(a, "status now").? == .invalid);
+    try testing.expect(Request.parse(a, "scratch-append").? == .invalid);
+    try testing.expect(Request.parse(a, "scratch-append {\"txt\":\"x\"}").? == .invalid);
+    try testing.expect(Request.parse(a, "scratch-append not json").? == .invalid);
+    try testing.expect(Request.parse(a, "scratch-append {\"text\":\"a\\u0000b\"}").? == .invalid);
+    // Hook messages, and anything else, aren't requests.
+    inline for (.{ "done", "working", "needs-input", "session", "pane=1 status", "" }) |line| {
+        try testing.expectEqual(@as(?Request, null), Request.parse(a, line));
+    }
+}
+
+test "request: an append round-trips text with newlines and quotes" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const text = "## Plan\n\n- fix \"it\"\n- ship\n";
+    try (Request{ .scratch_append = text }).write(&w);
+    try testing.expectEqualStrings(
+        \\scratch-append {"text":"## Plan\n\n- fix \"it\"\n- ship\n"}
+        \\
+    , w.buffered());
+    try testing.expectEqual(1, std.mem.count(u8, w.buffered(), "\n"));
+    const back = Request.parse(arena.allocator(), w.buffered()).?;
+    try testing.expectEqualStrings(text, back.scratch_append);
+}
+
+test "reply: only the field that's set goes on the wire" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try (Reply{ .@"error" = "no scratchpad" }).write(&w);
+    try testing.expectEqualStrings("{\"error\":\"no scratchpad\"}\n", w.buffered());
+    const back = try Reply.parse(arena.allocator(), w.buffered());
+    try testing.expectEqualStrings("no scratchpad", back.@"error".?);
+    try testing.expectEqual(@as(?[]const u8, null), back.text);
+}
+
+test "agent note: names every command it promises" {
+    inline for (.{ "roost scratch read", "roost scratch append", "roost status" }) |cmd| {
+        try testing.expect(std.mem.indexOf(u8, agent_note, cmd) != null);
+    }
 }
 
 test "status: a reply round-trips" {

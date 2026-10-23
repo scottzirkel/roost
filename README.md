@@ -73,7 +73,8 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
   failures to the Agent pane, a passing run to a notification.
 - **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
   `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
-  Agent pane's output back into the Scratchpad. The Scratchpad renders Markdown
+  Agent pane's output back into the Scratchpad. The agent can read your notes
+  and add a plan to them with `roost scratch`. The Scratchpad renders Markdown
   live (Typora-style) as you type and autosaves per project.
 - **Inherits your Ghostty config** — fonts, theme, keybinds, and (on Omarchy)
   your current theme are read from your existing `~/.config/ghostty`. A built-in
@@ -157,6 +158,27 @@ roost status --all --watch   # JSON now and on every change, for a desktop bar
 A window running an older build doesn't answer; it's listed until you reload
 it.
 
+### The agent and your notes
+
+The agent can read your Scratchpad and add to it, from its own pane:
+
+```sh
+roost scratch read                  # print the Scratchpad's Markdown
+roost scratch append "- try a cache"
+roost scratch append <<'EOF'        # or pipe it in
+## Plan
+- fix the login bug
+EOF
+```
+
+An append goes at the end as its own paragraph, and never changes what's
+already there. One `Ctrl+Z` in the Scratchpad takes it back. So you can ask
+Claude to "put the plan in my notes" or "check my notes".
+
+You don't have to tell Claude about these commands. When a conversation
+starts, the `SessionStart` hook asks the window for a short note on them, and
+Claude Code adds that note to the conversation.
+
 ### On the Omarchy bar
 
 On Omarchy, Roost can add a widget to the bar: 󱗆, plus how many windows have
@@ -226,7 +248,8 @@ and keeps a backup of the old file. By hand, the hooks look like this:
 The two `working` hooks matter: once a hook has reported, Roost stops reading
 that pane's screen, so without them the badge would stay on `✓ done` through
 the next run. `SessionStart` tells Roost which conversation the pane holds, so
-Reload can resume it, even right after a `/resume`.
+Reload can resume it, even right after a `/resume`. It also teaches the agent
+the `roost` commands.
 
 Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can

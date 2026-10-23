@@ -27,7 +27,7 @@ bin="$here/../vendor/ghostty/zig-out/bin/roost"
 # may be an agent's shell or the desktop bar. Keep in sync with `isCommand` in
 # src/roost/cli.zig.
 case "${1-}" in
-  status) exec "$bin" "$@" ;;
+  status|scratch) exec "$bin" "$@" ;;
 esac
 
 log="${XDG_STATE_HOME:-$HOME/.local/state}/roost.log"

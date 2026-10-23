@@ -11,10 +11,13 @@ remainder is an optional human-readable message:
 
 Recognized events (anything else is ignored by roost): done | needs-input | working | session
 
-`session` comes from Claude Code's SessionStart hook. It only tells Roost the
+`session` comes from Claude Code's SessionStart hook. It tells Roost the
 conversation's session id, so a reload can resume it, and changes no badge.
-Claude Code adds a SessionStart hook's stdout to the conversation, so this
-script must never print anything.
+Claude Code adds a SessionStart hook's stdout to the conversation, so for
+`session` this script prints the window's note on the `roost` commands
+(`roost scratch` and friends). That's how the agent learns them. An older
+window has no note and the script prints nothing. Every other event prints
+nothing, ever.
 
 When $ROOST_PANE is set (Roost exports it into each pane), the line is led by
 "pane=<id> ", so the window updates the badge of the pane the agent actually
@@ -49,6 +52,40 @@ def protocol() -> int:
         return 1
 
 
+def agent_note(sock_path: str) -> str:
+    """The window's note for the agent on the `roost` commands, or ""."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(sock_path)
+        s.sendall(b"agent-note\n")
+        data = b""
+        while len(data) < 64 * 1024:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        # An older window closes without a word.
+        reply = json.loads(data.decode("utf-8", "replace") or "{}")
+        text = reply.get("text", "") if isinstance(reply, dict) else ""
+        return text if isinstance(text, str) else ""
+    except Exception:
+        return ""
+
+
+def send(sock_path: str, line: str) -> None:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(sock_path)
+        s.sendall(line.encode("utf-8", "replace"))
+        s.close()
+    except Exception:
+        # Socket gone / roost not running / anything else: stay silent.
+        pass
+
+
 def main() -> int:
     sock_path = os.environ.get("ROOST_SOCK")
     if not sock_path:
@@ -79,6 +116,7 @@ def main() -> int:
         message = str(payload.get("message", "")).strip()
 
     line = event if not message else f"{event} {message}"
+    record = True
     # Letters, digits and dashes only, or Roost drops the whole line: the id
     # ends up in a shell command.
     session = str(payload.get("session_id", ""))
@@ -86,7 +124,7 @@ def main() -> int:
         line = f"session={session} {line}"
     elif event == "session":
         # Nothing to record, and an older Roost doesn't know the event.
-        return 0
+        record = False
     # One plain word, or Roost would drop the whole line.
     hook = str(payload.get("hook_event_name", ""))
     if hook.isascii() and hook.isalnum() and protocol() >= 2:
@@ -98,15 +136,12 @@ def main() -> int:
     # Keep it to one line; the receiver reads a single short message.
     line = line.replace("\n", " ").replace("\r", " ")
 
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect(sock_path)
-        s.sendall(line.encode("utf-8", "replace"))
-        s.close()
-    except Exception:
-        # Socket gone / roost not running / anything else: stay silent.
-        pass
+    if record:
+        send(sock_path, line)
+    if event == "session":
+        note = agent_note(sock_path)
+        if note:
+            print(note)
 
     return 0
 

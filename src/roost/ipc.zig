@@ -24,7 +24,9 @@
 //!
 //! The same socket answers requests (`core/control.zig`): a `status` line gets
 //! one line of JSON back with the window's project, branch and agent state.
-//! That's how `roost status` and the desktop bar see every window.
+//! That's how `roost status` and the desktop bar see every window. The
+//! `scratch-read` and `scratch-append` requests are `roost scratch`, which lets
+//! the agent read and add to the Scratchpad.
 //!
 //! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
 //! that's installed never has, the server warns once with a notification.
@@ -182,21 +184,43 @@ pub const Server = struct {
     }
 
     /// Heap context for an in-flight async read: keeps the connection alive and
-    /// owns the read buffer until the read completes off the main loop.
+    /// owns the buffers until the whole line has arrived.
     /// align(8): the read binding wants `*[*]u8`, so the buffer must be
     /// pointer-aligned (the value we pass IS C's buffer address — see below).
     const ReadCtx = struct {
         server: *Server,
         connection: *gio.SocketConnection,
-        buf: [1024]u8 align(8),
+        /// One read's worth.
+        buf: [4096]u8 align(8),
+        /// The line so far. A scratchpad append can take many reads.
+        line: std.ArrayListUnmanaged(u8) = .empty,
+
+        /// Ask for the next chunk; `onReadComplete` runs when it's in.
+        fn readMore(ctx: *ReadCtx) void {
+            const istream = ctx.connection.as(gio.IOStream).getInputStream();
+            // The binding types g_input_stream_read_async's `void* buffer` as
+            // `*[*]u8`; the pointer VALUE we pass is C's buffer address, so we
+            // hand it a `*[*]u8` whose value is &ctx.buf, i.e. @ptrCast(&ctx.buf).
+            istream.readAsync(@ptrCast(&ctx.buf), ctx.buf.len, 0, null, onReadComplete, ctx);
+        }
+
+        /// Act on the line (when `use` is set), then drop the connection ref
+        /// taken in `onIncoming` and free everything.
+        fn finish(ctx: *ReadCtx, use: bool) void {
+            const server = ctx.server;
+            if (use) server.dispatch(ctx.connection, ctx.line.items);
+            ctx.connection.as(gobject.Object).unref();
+            ctx.line.deinit(server.alloc);
+            server.alloc.destroy(ctx);
+        }
     };
 
-    /// `incoming` signal handler. Starts an ASYNCHRONOUS read of one short
-    /// message and returns TRUE immediately. A synchronous read here would block
-    /// the GTK main loop until the client writes — so a process that connects to
+    /// `incoming` signal handler. Starts an ASYNCHRONOUS read of one line and
+    /// returns TRUE immediately. A synchronous read here would block the GTK
+    /// main loop until the client writes — so a process that connects to
     /// ROOST_SOCK (exported into every pane) but stalls before writing could
-    /// freeze the whole UI. The read is serviced off the loop in
-    /// `onReadComplete`, which drops the connection.
+    /// freeze the whole UI. The reads are serviced off the loop in
+    /// `onReadComplete`, which drops the connection once the line is in.
     fn onIncoming(
         _: *gio.SocketService,
         connection: *gio.SocketConnection,
@@ -205,36 +229,49 @@ pub const Server = struct {
     ) callconv(.c) c_int {
         const ctx = self.alloc.create(ReadCtx) catch return @intFromBool(true);
         ctx.* = .{ .server = self, .connection = connection, .buf = undefined };
-        // Keep the connection alive across the async read: the SocketService
-        // drops its ref once we return TRUE. Released in onReadComplete.
+        // Keep the connection alive across the async reads: the SocketService
+        // drops its ref once we return TRUE. Released in ReadCtx.finish.
         _ = connection.as(gobject.Object).ref();
-        const istream = connection.as(gio.IOStream).getInputStream();
-        // The binding types g_input_stream_read_async's `void* buffer` as
-        // `*[*]u8`; the pointer VALUE we pass is C's buffer address, so we hand
-        // it a `*[*]u8` whose value is &ctx.buf — i.e. @ptrCast(&ctx.buf).
-        istream.readAsync(@ptrCast(&ctx.buf), ctx.buf.len, 0, null, onReadComplete, ctx);
+        ctx.readMore();
         return @intFromBool(true);
     }
 
-    /// Async-read completion (main loop): parse the message, then free the
-    /// context and drop the connection ref taken in `onIncoming`.
+    /// Async-read completion (main loop). The line ends at a newline, which a
+    /// request sends so it can wait for the answer, or when the client closes,
+    /// which is how a hook sends (roost-notify writes no newline).
     fn onReadComplete(_: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const ctx: *ReadCtx = @ptrCast(@alignCast(data.?));
-        defer {
-            ctx.connection.as(gobject.Object).unref();
-            ctx.server.alloc.destroy(ctx);
-        }
         const istream = ctx.connection.as(gio.IOStream).getInputStream();
         var gerr: ?*glib.Error = null;
         defer if (gerr) |e| e.free();
         const n = istream.readFinish(res, &gerr);
-        if (n <= 0) return; // EOF or error: nothing usable.
-        const msg = std.mem.trim(u8, ctx.buf[0..@intCast(n)], " \t\r\n");
-        if (control.Request.parse(msg)) |req| {
-            ctx.server.answer(ctx.connection, req);
-            return;
+        if (n < 0) return ctx.finish(false);
+        if (n == 0) return ctx.finish(ctx.line.items.len > 0);
+
+        const chunk = ctx.buf[0..@intCast(n)];
+        const end = std.mem.indexOfScalar(u8, chunk, '\n');
+        const part = chunk[0 .. end orelse chunk.len];
+        if (ctx.line.items.len + part.len > control.Request.max_line) {
+            log.debug("dropping an ipc line over {d} bytes", .{control.Request.max_line});
+            return ctx.finish(false);
         }
-        ctx.server.handle(msg);
+        ctx.line.appendSlice(ctx.server.alloc, part) catch return ctx.finish(false);
+        if (end != null) return ctx.finish(true);
+        ctx.readMore();
+    }
+
+    /// The longest hook line acted on. Anything past it was cut off before
+    /// requests could be long, and a notification body has to fit `notifyApp`.
+    const max_hook_line = 1024;
+
+    /// One line from a client: a request gets its answer on the same
+    /// connection, and anything else is a hook message.
+    fn dispatch(self: *Server, connection: *gio.SocketConnection, raw: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer arena.deinit();
+        const line = std.mem.trim(u8, raw, " \t\r\n");
+        if (control.Request.parse(arena.allocator(), line)) |req| return self.answer(connection, req);
+        self.handle(std.mem.trimRight(u8, line[0..@min(line.len, max_hook_line)], " \t\r"));
     }
 
     /// Heap context for an in-flight async reply: keeps the connection alive
@@ -249,19 +286,14 @@ pub const Server = struct {
     /// write is asynchronous for the same reason the read is: a client that
     /// asks and never reads must not stall the window.
     fn answer(self: *Server, connection: *gio.SocketConnection, req: control.Request) void {
-        var buf: [std.fs.max_path_bytes * 2 + 256]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&buf);
-        switch (req) {
-            .status => {
-                var branch_buf: [256]u8 = undefined;
-                self.statusReply(&branch_buf).write(&w) catch return;
-            },
-        }
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        self.reply(req, &out.writer) catch return;
         const ctx = self.alloc.create(WriteCtx) catch return;
         ctx.* = .{
             .server = self,
             .connection = connection,
-            .reply = self.alloc.dupe(u8, w.buffered()) catch {
+            .reply = out.toOwnedSlice() catch {
                 self.alloc.destroy(ctx);
                 return;
             },
@@ -284,6 +316,31 @@ pub const Server = struct {
         defer if (gerr) |e| e.free();
         // A client that hung up early is its own business; nothing to undo.
         _ = ostream.writeAllFinish(res, null, &gerr);
+    }
+
+    /// Carry out `req` and write its answer line.
+    fn reply(self: *Server, req: control.Request, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const no_pad: control.Reply = .{ .@"error" = "This Roost window has no Scratchpad pane. Add one with Ctrl+Shift+N." };
+        switch (req) {
+            .status => {
+                var branch_buf: [256]u8 = undefined;
+                try self.statusReply(&branch_buf).write(w);
+            },
+            .scratch_read => {
+                const pad = self.workspace.scratchpad() orelse return no_pad.write(w);
+                const text = pad.readText(self.alloc) orelse
+                    return (control.Reply{ .@"error" = "Roost ran out of memory reading the scratchpad." }).write(w);
+                defer self.alloc.free(text);
+                try (control.Reply{ .text = text }).write(w);
+            },
+            .scratch_append => |text| {
+                const pad = self.workspace.scratchpad() orelse return no_pad.write(w);
+                pad.appendBlock(text);
+                try (control.Reply{ .ok = true }).write(w);
+            },
+            .agent_note => try (control.Reply{ .text = control.agent_note }).write(w),
+            .invalid => |why| try (control.Reply{ .@"error" = why }).write(w),
+        }
     }
 
     /// This window's answer to `status`. The branch lives in `branch_buf`.

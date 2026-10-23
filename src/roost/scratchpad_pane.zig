@@ -205,6 +205,50 @@ pub const ScratchpadPane = struct {
         _ = self.text_view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
     }
 
+    /// The whole buffer: the raw Markdown, as the file would hold it. Owned by
+    /// `alloc`; null only when out of memory.
+    pub fn readText(self: *ScratchpadPane, alloc: Allocator) ?[]u8 {
+        const buffer = self.text_view.getBuffer();
+        var start: gtk.TextIter = undefined;
+        var end: gtk.TextIter = undefined;
+        buffer.getBounds(&start, &end);
+        const text = buffer.getText(&start, &end, 1);
+        defer glib.free(text);
+        return alloc.dupe(u8, std.mem.span(text)) catch null;
+    }
+
+    /// Append `bytes` as its own paragraph (`roost scratch append`): a blank
+    /// line before it unless the buffer is empty, and a newline after. One
+    /// user action, so a single Ctrl+Z takes the whole append back.
+    pub fn appendBlock(self: *ScratchpadPane, bytes: []const u8) void {
+        const text = std.mem.trimRight(u8, bytes, "\n");
+        if (text.len == 0) return;
+        const buffer = self.text_view.getBuffer();
+
+        // How many newlines the buffer already ends with (0, 1, or 2 = enough).
+        var tail: usize = 0;
+        if (buffer.getCharCount() > 0) {
+            var end: gtk.TextIter = undefined;
+            buffer.getEndIter(&end);
+            while (tail < 2 and end.backwardChar() != 0 and end.getChar() == '\n') tail += 1;
+        } else {
+            tail = 2;
+        }
+        const lead = "\n\n"[0 .. 2 - tail];
+
+        const z = std.fmt.allocPrintSentinel(self.alloc, "{s}{s}\n", .{ lead, text }, 0) catch return;
+        defer self.alloc.free(z);
+
+        buffer.beginUserAction();
+        var end: gtk.TextIter = undefined;
+        buffer.getEndIter(&end);
+        buffer.insert(&end, z.ptr, @intCast(z.len));
+        buffer.endUserAction();
+
+        buffer.getEndIter(&end);
+        _ = self.text_view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+    }
+
     // --- live styling -----------------------------------------------------
 
     /// Re-derive and re-apply all markdown styling over the whole buffer. Cheap

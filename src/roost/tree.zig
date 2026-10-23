@@ -28,7 +28,7 @@ const glib = @import("glib");
 
 const terminal_pane = @import("terminal_pane.zig");
 const TerminalPane = terminal_pane.TerminalPane;
-const ScratchpadPane = @import("scratchpad_pane.zig").ScratchpadPane;
+pub const ScratchpadPane = @import("scratchpad_pane.zig").ScratchpadPane;
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const detect = @import("core/agent_detect.zig");
 const hook_msg = @import("core/hook_msg.zig");
@@ -1110,6 +1110,13 @@ pub const Tree = struct {
                 if (l.agent.state.attention() > best.attention()) best.* = l.agent.state;
             },
         }
+    }
+
+    /// The first Scratchpad pane (tree order), which `roost scratch` reads
+    /// and appends to, the way capture does. Null when the window has none.
+    pub fn scratchpad(self: *Tree) ?*ScratchpadPane {
+        const node = self.firstLeafOfRole(.scratchpad) orelse return null;
+        return if (node.leaf.pane == .scratchpad) &node.leaf.pane.scratchpad else null;
     }
 
     /// First leaf (tree order) whose role matches `role`, or null.
