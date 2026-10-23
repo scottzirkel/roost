@@ -2004,6 +2004,11 @@ fn onRunAction(_: *gio.SimpleAction, param: ?*glib.Variant, a: *AppContext) call
 const ActionRun = struct {
     app_ctx: *AppContext,
     label: []u8,
+    /// The window's project name when the run started, for the result popup.
+    /// Captured rather than read at finish: a project switch doesn't stop runs,
+    /// and the popup should name the project the action actually ran in.
+    /// Empty (no prefix) when there's no project or the dupe hit OOM.
+    project: []const u8,
     command: []u8,
     cwd: ?[]u8,
     route: actions.Route,
@@ -2075,10 +2080,12 @@ fn runAction(a: *AppContext, action: actions.Action) void {
     // cwd: explicit override, else the project root, else inherit (null).
     const cwd_src: ?[]const u8 = action.cwd orelse (if (a.current.path.len > 0) a.current.path else null);
     const cwd: ?[]u8 = if (cwd_src) |c| (ca.dupe(u8, c) catch null) else null;
+    const project_name: []const u8 = ca.dupe(u8, a.current.displayName()) catch "";
 
     ar.* = .{
         .app_ctx = a,
         .label = label,
+        .project = project_name,
         .command = command,
         .cwd = cwd,
         .route = action.route,
@@ -2293,8 +2300,8 @@ fn routeFinished(ar: *ActionRun) void {
         .notify => {
             const gapp = ar.app_ctx.window.as(gtk.Window).getApplication() orelse return;
             const verdict: []const u8 = if (ar.stopped) "stopped" else if (ar.failed_to_run) "error" else if (ar.code == 0) "passed" else "failed";
-            var tbuf: [192]u8 = undefined;
-            const title = std.fmt.bufPrintZ(&tbuf, "{s}: {s}", .{ ar.label, verdict }) catch "Action";
+            var tbuf: [384]u8 = undefined;
+            const title = actions.popupTitle(&tbuf, ar.project, ar.label, verdict);
             // Body omits the numeric exit code: "exit code 0" reads as failure to
             // anyone who associates 0 with false; the verdict word carries it.
             const body: []const u8 = if (ar.failed_to_run) "could not run command" else "";
@@ -2341,6 +2348,7 @@ fn removeActiveRun(ar: *ActionRun) void {
 fn freeActionRun(ar: *ActionRun) void {
     const ca = std.heap.c_allocator;
     ca.free(ar.label);
+    ca.free(ar.project);
     ca.free(ar.command);
     if (ar.cwd) |c| ca.free(c);
     ar.output.deinit(ca);

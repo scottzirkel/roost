@@ -167,6 +167,17 @@ pub fn freeActions(alloc: Allocator, actions: []const Action) void {
     alloc.free(actions);
 }
 
+/// Title for a finished run's popup: "<project> — <label>: <verdict>". The
+/// project goes first, like the agent popups ("roost — Agent finished"): with
+/// several windows open, "tests: failed" alone can't say which project's tests.
+/// An empty `project` means no prefix. Overflow drops the prefix, not the popup.
+pub fn popupTitle(buf: []u8, project: []const u8, label: []const u8, verdict: []const u8) [:0]const u8 {
+    if (project.len > 0) {
+        if (std.fmt.bufPrintZ(buf, "{s} — {s}: {s}", .{ project, label, verdict })) |t| return t else |_| {}
+    }
+    return std.fmt.bufPrintZ(buf, "{s}: {s}", .{ label, verdict }) catch "Action";
+}
+
 // ---------------------------------------------------------------------------
 // Tests (pure: run with `zig test src/roost/actions.zig`)
 // ---------------------------------------------------------------------------
@@ -250,4 +261,18 @@ test "parse: empty / no actions key" {
     const a = try parse(alloc, "{}");
     defer freeActions(alloc, a);
     try std.testing.expectEqual(@as(usize, 0), a.len);
+}
+
+test "popupTitle: project prefix, none without a project, overflow drops it" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("roost — tests: failed", popupTitle(&buf, "roost", "tests", "failed"));
+    try std.testing.expectEqualStrings("tests: passed", popupTitle(&buf, "", "tests", "passed"));
+
+    // Prefix doesn't fit but the bare title does: keep the bare title.
+    const long_project = "p" ** 60;
+    try std.testing.expectEqualStrings("tests: failed", popupTitle(&buf, long_project, "tests", "failed"));
+
+    // Nothing fits: still a popup, with a generic title.
+    const long_label = "l" ** 70;
+    try std.testing.expectEqualStrings("Action", popupTitle(&buf, "roost", long_label, "failed"));
 }
