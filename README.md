@@ -159,15 +159,21 @@ always its own independent window.
 ### Agent notifications
 
 The Agent pane exports `ROOST_SOCK` into every pane. Wiring `scripts/roost-notify`
-into Claude Code's `Stop` and `Notification` hooks lets the agent ping Roost:
+into Claude Code's hooks lets the agent ping Roost:
 
 ```jsonc
 // ~/.claude/settings.json  (see scripts/claude-hooks.json for the full snippet)
 "hooks": {
-  "Stop":         [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify done" }] }],
-  "Notification": [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify needs-input" }] }]
+  "Stop":             [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify done" }] }],
+  "Notification":     [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify needs-input" }] }],
+  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true }] }],
+  "PostToolBatch":    [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true }] }]
 }
 ```
+
+The two `working` hooks matter: once a hook has reported, Roost stops reading
+that pane's screen, so without them the badge would stay on `✓ done` through
+the next run.
 
 Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can

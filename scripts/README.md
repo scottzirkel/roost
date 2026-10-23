@@ -68,8 +68,9 @@ and exits 0 — it can never break your agent.
    `~/.claude/settings.json`. **Roost does NOT edit that file for you.**
 
    - If you have no `hooks` key yet, copy the whole `"hooks": { ... }` object in.
-   - If you already have a `hooks` key, merge by event: append our `Stop` and
-     `Notification` entries into your existing arrays for those events.
+   - If you already have a `hooks` key, merge by event: append our `Stop`,
+     `Notification`, `UserPromptSubmit` and `PostToolBatch` entries into your
+     existing arrays for those events.
    - Replace `/ABSOLUTE/PATH/TO/scripts` with the real absolute path, e.g.
      `/home/scott/projects/roost/scripts`.
 
@@ -83,6 +84,12 @@ and exits 0 — it can never break your agent.
        ],
        "Notification": [
          { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify needs-input" } ] }
+       ],
+       "UserPromptSubmit": [
+         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify working", "async": true } ] }
+       ],
+       "PostToolBatch": [
+         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify working", "async": true } ] }
        ]
      }
    }
@@ -94,6 +101,12 @@ and exits 0 — it can never break your agent.
      prompt, idle input request) → `roost-notify needs-input`. The hook's JSON
      payload (delivered on stdin) carries a `message` field, which
      `roost-notify` forwards as the notification body → badge `🔔 needs you`.
+   - **`UserPromptSubmit`** (you send a prompt) and **`PostToolBatch`** (a batch
+     of tool calls finished, including one you just approved) →
+     `roost-notify working` → badge `● working`, no notification. Without these,
+     a hooked pane keeps showing `✓ done` while the next run is underway, and
+     `🔔` stays up after you answer, because Roost stops reading a pane's screen
+     once a hook has reported. `async` keeps them from slowing the agent down.
 
 ## Manual test
 
