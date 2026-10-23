@@ -47,7 +47,8 @@ logs and above. The daily-use binary has so far been a debug build; the
 
 Running windows keep the code they started with. A rebuild replaces the file on
 disk, and `Ctrl+Shift+Q` in a window reloads it into the new build, keeping the
-layout. Pane processes and scrollback start fresh.
+layout. Claude Code picks up its conversation in each Agent pane, if Roost's
+hooks are installed. Other pane processes and scrollback start fresh.
 
 ## Checks
 

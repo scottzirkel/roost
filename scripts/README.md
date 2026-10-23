@@ -24,11 +24,13 @@ desktop notification and a status badge when the agent finishes or needs you.
    **`ROOST_SOCK`**. Every pane Roost spawns inherits it. Each pane also gets
    its own **`ROOST_PANE`**, a number that names that pane.
 2. `roost-notify` connects to `$ROOST_SOCK` and writes one short line:
-   `[pane=<id>] [hook=<Event>] <event> [message]`, where `<event>` is `done`,
-   `needs-input` or `working`, and `<id>` is `$ROOST_PANE`. `hook=` names the
-   Claude Code hook that ran, so Roost can tell which hooks actually run. It's
-   only sent when the pane's `ROOST_PROTOCOL` is 2 or more, because an older
-   Roost would drop a line with a field it doesn't know.
+   `[pane=<id>] [hook=<Event>] [session=<id>] <event> [message]`, where
+   `<event>` is `done`, `needs-input` or `working`, and `pane=` is
+   `$ROOST_PANE`. `hook=` names the Claude Code hook that ran, so Roost can
+   tell which hooks actually run. `session=` is the Claude session, so a reload
+   can resume it. Each is only sent when the pane's `ROOST_PROTOCOL` is new
+   enough (2 for `hook=`, 3 for `session=`), because an older Roost would drop
+   a line with a field it doesn't know.
 3. Roost shows a native notification (for `done` and `needs-input`) and updates
    the badge of the Agent pane the agent runs in. A line without `pane=` goes
    to the first Agent pane.

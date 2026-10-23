@@ -17,8 +17,9 @@ runs in. Without it, every agent in a window reports to the first Agent pane.
 
 When $ROOST_PROTOCOL is 2 or more, the line also names the Claude Code hook
 that ran ("hook=Stop "), taken from the payload's hook_event_name, so Roost can
-tell which hooks actually run. An older Roost doesn't set it, and would drop a
-line carrying a field it doesn't know.
+tell which hooks actually run. From 3, it also carries the payload's session_id
+("session=<id> "), so a reload can resume the conversation. An older Roost sets
+a lower number, or none, and would drop a line carrying a field it doesn't know.
 
 This is meant to be wired into Claude Code hooks. Claude Code passes the hook
 payload as JSON on stdin; we read and ignore it (we only care about argv), but
@@ -73,6 +74,11 @@ def main() -> int:
         message = str(payload.get("message", "")).strip()
 
     line = event if not message else f"{event} {message}"
+    # Letters, digits and dashes only, or Roost drops the whole line: the id
+    # ends up in a shell command.
+    session = str(payload.get("session_id", ""))
+    if protocol() >= 3 and 0 < len(session) <= 64 and session.isascii() and session.replace("-", "").isalnum():
+        line = f"session={session} {line}"
     # One plain word, or Roost would drop the whole line.
     hook = str(payload.get("hook_event_name", ""))
     if hook.isascii() and hook.isalnum() and protocol() >= 2:

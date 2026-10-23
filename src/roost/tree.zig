@@ -31,6 +31,7 @@ const TerminalPane = terminal_pane.TerminalPane;
 const ScratchpadPane = @import("scratchpad_pane.zig").ScratchpadPane;
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const detect = @import("core/agent_detect.zig");
+const hook_msg = @import("core/hook_msg.zig");
 
 const log = std.log.scoped(.roost_tree);
 
@@ -38,6 +39,35 @@ const log = std.log.scoped(.roost_tree);
 /// pane's processes as `ROOST_PANE` and comes back over this process's one
 /// `ROOST_SOCK`, so it must never repeat within the process. Main thread only.
 var next_pane_id: u32 = 1;
+
+/// Claude sessions to resume, one per Agent pane in tree order, comma-separated
+/// (an empty entry for a pane that had none). A reload hands them to the new
+/// process in `ROOST_RESUME_SESSIONS`; app.zig queues them before restoring
+/// the layout, and each restored Agent pane takes the next. Cleared once the
+/// startup tree is built, so later panes start fresh. Main thread only.
+var resume_buf: [1024]u8 = undefined;
+var resume_rest: ?[]const u8 = null;
+
+/// Queue sessions for the next Agent panes to spawn (see `resume_buf`).
+/// Ignored when it doesn't fit, which only loses the resume.
+pub fn queueResumes(list: []const u8) void {
+    if (list.len > resume_buf.len) return;
+    @memcpy(resume_buf[0..list.len], list);
+    resume_rest = resume_buf[0..list.len];
+}
+
+pub fn clearResumes() void {
+    resume_rest = null;
+}
+
+/// The next queued session, or null when there's none for this pane.
+fn nextResume() ?[]const u8 {
+    const rest = resume_rest orelse return null;
+    const comma = std.mem.indexOfScalar(u8, rest, ',');
+    const id = if (comma) |i| rest[0..i] else rest;
+    resume_rest = if (comma) |i| rest[i + 1 ..] else null;
+    return if (hook_msg.validSession(id)) id else null;
+}
 
 /// Focus-follows-mouse: when on, the pointer entering a pane focuses it (mini-
 /// Hyprland feel). App-wide mode (not per-tree), so a module global; toggled at
@@ -219,6 +249,9 @@ pub const Leaf = struct {
     /// command. Stored per-leaf rather than per-tree so panes running different
     /// agent CLIs can coexist.
     manifest: *const detect.Manifest = &detect.generic,
+    /// The Claude Code session running in an Agent pane, from its hooks, so a
+    /// reload can resume it. Empty until a hook reports one.
+    session: Session = .{},
     /// The vertical box holding [header label, pane content]. This is the
     /// widget parented into the tree (so it can be reparented as a unit).
     box: *gtk.Box,
@@ -229,6 +262,23 @@ pub const Leaf = struct {
     /// pointer-enter, cleared on leave/fire; removed at teardown so the one-shot
     /// can't fire on a freed node. See `attachFollowMouse`.
     dwell_source: c_uint = 0,
+};
+
+/// A Claude Code session id, kept inline so a leaf needs no extra freeing.
+pub const Session = struct {
+    buf: [hook_msg.max_session_len]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn get(self: *const Session) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    /// Ignores an id that isn't one (see `hook_msg.validSession`).
+    pub fn set(self: *Session, id: []const u8) void {
+        if (!hook_msg.validSession(id)) return;
+        @memcpy(self.buf[0..id.len], id);
+        self.len = @intCast(id.len);
+    }
 };
 
 /// A split node: a gtk.Paned with two child nodes.
@@ -436,7 +486,8 @@ pub const Tree = struct {
 
         const id = next_pane_id;
         next_pane_id +%= 1;
-        var pane = self.spawnPane(role, id);
+        const resumed = if (role == .agent) nextResume() else null;
+        var pane = self.spawnPane(role, id, resumed);
         // Wire the close-request no-op on terminal panes if we have a handler.
         if (pane == .terminal) {
             if (self.close_cb) |cb| {
@@ -459,6 +510,7 @@ pub const Tree = struct {
             else
                 &detect.generic,
         } };
+        if (resumed) |session| node.leaf.session.set(session);
         // Autosave wiring needs the pane's FINAL address (it was moved into the
         // node above), so connect the scratchpad's `changed` handler here.
         if (node.leaf.pane == .scratchpad) node.leaf.pane.scratchpad.wire();
@@ -470,13 +522,15 @@ pub const Tree = struct {
     }
 
     /// Construct the pane content for a role. `id` becomes the terminal's
-    /// `ROOST_PANE`.
-    fn spawnPane(self: *Tree, role: Role, id: u32) Pane {
+    /// `ROOST_PANE`; `resumed` is a Claude session for an Agent pane to resume.
+    fn spawnPane(self: *Tree, role: Role, id: u32, resumed: ?[]const u8) Pane {
+        // Ghostty copies the command, so a stack buffer is enough.
+        var cmd_buf: [1024]u8 = undefined;
         return switch (role) {
             // Agent runs the resolved agent command (e.g. `claude`) if we have
             // one; otherwise it falls back to the user's default shell (null).
             .agent => .{ .terminal = TerminalPane.initGhostty(.{
-                .command = if (self.agent_cmd) |c| .{ .shell = c } else null,
+                .command = if (self.agentCommand(&cmd_buf, resumed)) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
                 .pane_id = id,
@@ -502,6 +556,17 @@ pub const Tree = struct {
             }) },
             .scratchpad => .{ .scratchpad = ScratchpadPane.init(self.alloc, self.scratch_path, self.scratch_autosave) },
         };
+    }
+
+    /// The Agent pane's command. With a session to resume and a Claude agent,
+    /// that's `<cmd> --resume <id> || <cmd>`: a session Claude can't find
+    /// exits with an error, and the pane starts a fresh one instead of closing.
+    /// The id is letters, digits and dashes only, so it's safe in the shell.
+    fn agentCommand(self: *const Tree, buf: []u8, resumed: ?[]const u8) ?[:0]const u8 {
+        const cmd = self.agent_cmd orelse return null;
+        const session = resumed orelse return cmd;
+        if (!std.mem.eql(u8, detect.manifestFor(cmd).id, "claude")) return cmd;
+        return std.fmt.bufPrintZ(buf, "{s} --resume {s} || {s}", .{ cmd, session, cmd }) catch cmd;
     }
 
     /// Allocate a split node wrapping two existing child nodes in a gtk.Paned.
@@ -928,6 +993,44 @@ pub const Tree = struct {
         if (node.leaf.role != .agent) return;
         node.leaf.agent.report(status.toDetect());
         node.leaf.label.setText(status.badge());
+    }
+
+    /// Remember the Claude session an Agent pane's hooks reported, found the
+    /// same way as `setAgentStatus`. The latest wins: `/clear` starts a new one.
+    pub fn setAgentSession(self: *Tree, pane: ?u32, session: []const u8) void {
+        const node = if (pane) |id|
+            self.leafById(id) orelse return
+        else
+            self.firstLeafOfRole(.agent) orelse return;
+        if (node.leaf.role != .agent) return;
+        node.leaf.session.set(session);
+    }
+
+    /// Every Agent pane's session in tree order, comma-separated, for a reload
+    /// to resume (see `queueResumes`). Empty entries for panes without one;
+    /// all empty means there's nothing to resume.
+    pub fn agentSessions(self: *Tree, buf: []u8) []const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        var first = true;
+        var any = false;
+        sessionsWalk(self.root, &w, &first, &any) catch return "";
+        return if (any) w.buffered() else "";
+    }
+
+    fn sessionsWalk(node: *Node, w: *std.Io.Writer, first: *bool, any: *bool) std.Io.Writer.Error!void {
+        switch (node.*) {
+            .split => |*s| {
+                try sessionsWalk(s.start, w, first, any);
+                try sessionsWalk(s.end, w, first, any);
+            },
+            .leaf => |*l| {
+                if (l.role != .agent) return;
+                if (!first.*) try w.writeByte(',');
+                first.* = false;
+                try w.writeAll(l.session.get());
+                any.* = any.* or l.session.len > 0;
+            },
+        }
     }
 
     /// Poll every live agent pane's screen and update its badge.

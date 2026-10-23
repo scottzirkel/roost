@@ -384,10 +384,18 @@ pub fn run() !void {
     // free our copy right after).
     const scratch_path = cfg.scratchpadPathFor(alloc, pane_cwd orelse "");
     defer if (scratch_path) |p| alloc.free(p);
+    // After a reload, resume each Agent pane's Claude session (see doReload).
+    // Taken out of the environment first, so no pane or new window inherits it.
+    if (std.posix.getenv("ROOST_RESUME_SESSIONS")) |sessions| {
+        tree.queueResumes(sessions);
+        log.info("resuming agent sessions: {s}", .{sessions});
+        _ = internal_os.unsetenv("ROOST_RESUME_SESSIONS");
+    }
     workspace = Workspace.init(alloc, git_cmd, agent_cmd, pane_cwd, saved, .{
         .path = scratch_path,
         .autosave = cfg.scratchpad_autosave,
     });
+    tree.clearResumes();
     layout_arena.deinit(); // SerNode no longer needed once the tree is built
     workspace.window = window.as(gtk.Window); // for live-focus sync on ops
     window.as(gtk.Window).setChild(workspace.root);
@@ -824,7 +832,7 @@ fn onReload(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
     confirmDestructive(
         a,
         "Reload Roost?",
-        "Restarts this window into the latest build. Panes reopen from the saved layout, but anything running in them (shells, the agent) ends.",
+        "Restarts this window into the latest build. Panes reopen from the saved layout, and Claude Code picks up its conversation if Roost's hooks are installed. Anything else running in the panes, like shells, ends.",
         "Reload",
         doReload,
         false,
@@ -832,8 +840,18 @@ fn onReload(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
 }
 
 /// Confirmed reload: persist the layout, then re-exec into the latest build.
+/// The Agent panes' Claude sessions ride along in `ROOST_RESUME_SESSIONS`, so
+/// the new image resumes each conversation in its pane (see `run`).
 fn doReload(a: *AppContext) void {
     saveLayout(a);
+    var sessions_buf: [1024]u8 = undefined;
+    const sessions = a.workspace.agentSessions(&sessions_buf);
+    if (sessions.len > 0) {
+        var z_buf: [1025]u8 = undefined;
+        const z = std.fmt.bufPrintZ(&z_buf, "{s}", .{sessions}) catch "";
+        _ = internal_os.setenv("ROOST_RESUME_SESSIONS", z);
+        log.info("reload will resume agent sessions: {s}", .{sessions});
+    }
     // TERM in-flight action children before the image swap — re-exec keeps our
     // PID and won't signal them, so they'd otherwise run on (the dialog says they
     // end). We do NOT flip `actions_alive` here: reExecSelf returns on failure
@@ -842,6 +860,7 @@ fn doReload(a: *AppContext) void {
     log.info("reloading roost (re-exec into latest build)", .{});
     reExecSelf(a) catch |err| {
         log.warn("reload failed; staying put err={}", .{err});
+        _ = internal_os.unsetenv("ROOST_RESUME_SESSIONS");
         return;
     };
     // execve does not return on success — anything past here means it failed.
@@ -1840,7 +1859,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+Y", .text = "Capture Agent output → scratchpad" },
     .{ .keys = "Ctrl+Shift+M", .text = "Toggle focus-follows-mouse (on by default)" },
     .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
-    .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build" },
+    .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build; Claude resumes" },
     .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
 };
 

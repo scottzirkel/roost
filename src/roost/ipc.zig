@@ -19,6 +19,7 @@
 //!     working          -> (no notification)     (● working badge only)
 //!     pane=3 done     -> the same, for the pane whose ROOST_PANE is 3
 //!     hook=Stop done  -> the same, naming the Claude Code hook that sent it
+//!     session=<id> done -> the same, from that Claude session (for reload)
 //! Unknown events are ignored. Parsing lives in `core/hook_msg.zig`.
 //!
 //! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
@@ -156,8 +157,8 @@ pub const Server = struct {
         // reach us. MUST happen before the workspace spawns its panes.
         _ = internal_os.setenv("ROOST_SOCK", path);
         // The newest message format this build parses (see core/hook_msg.zig).
-        // roost-notify only names its hook when this says it may.
-        _ = internal_os.setenv("ROOST_PROTOCOL", "2");
+        // roost-notify only adds its newer fields when this says it may.
+        _ = internal_os.setenv("ROOST_PROTOCOL", "3");
 
         log.info("ipc listening on {s} (exported as ROOST_SOCK)", .{path});
     }
@@ -250,6 +251,7 @@ pub const Server = struct {
 
         // Update the sender's Agent-pane badge for every known event.
         self.workspace.setAgentStatus(msg.pane, statusOf(msg.event));
+        if (msg.session.len > 0) self.workspace.setAgentSession(msg.pane, msg.session);
 
         // Notify (+ optional sound) for the attention-worthy events only. An
         // agent in a Shell pane gets no badge, but still gets its popup.

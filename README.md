@@ -155,7 +155,7 @@ last project, or the project chooser if Roost is already running.
 | `Ctrl+Shift+M` | Toggle focus-follows-mouse |
 | `Ctrl+,` | Open Settings |
 | `Ctrl+Shift+/` | Show the keyboard cheat-sheet |
-| `Ctrl+Shift+Q` | Reload — restart into the latest build |
+| `Ctrl+Shift+Q` | Reload — restart into the latest build; Claude resumes its conversation |
 | `Ctrl+Q` | Quit (saves the layout) |
 
 > Note: shifted-digit accelerators don't fire in GTK, which is why splits/roles

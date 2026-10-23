@@ -214,6 +214,18 @@ pub const Workspace = struct {
         self.t.setAgentStatus(pane, status);
     }
 
+    /// Remember the Claude session an Agent pane's hooks reported. See
+    /// `Tree.setAgentSession`.
+    pub fn setAgentSession(self: *Workspace, pane: ?u32, session: []const u8) void {
+        self.t.setAgentSession(pane, session);
+    }
+
+    /// Every Agent pane's session, for a reload to resume. See
+    /// `Tree.agentSessions`.
+    pub fn agentSessions(self: *Workspace, buf: []u8) []const u8 {
+        return self.t.agentSessions(buf);
+    }
+
     /// Poll every live agent pane's screen and refresh its badge. Driven by a
     /// timer in app.zig; see `Tree.pollAgents`.
     pub fn pollAgents(self: *Workspace) bool {

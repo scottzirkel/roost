@@ -6,7 +6,7 @@
 //! socket server (`ipc.zig`), which only moves bytes and acts on the result.
 //!
 //! FORMAT:
-//!     [pane=<id>] [hook=<Event>] <event> [message...]
+//!     [pane=<id>] [hook=<Event>] [session=<id>] <event> [message...]
 //! `event` is `working`, `needs-input` or `done`; anything else is ignored.
 //!
 //! The optional leading `pane=<id>` says WHICH pane the agent runs in. Roost
@@ -22,6 +22,10 @@
 //! run (`claude_hooks.Liveness`). An older Roost would drop a line with a
 //! token it doesn't know, so roost-notify only adds it when the pane's
 //! `ROOST_PROTOCOL` is 2 or more.
+//!
+//! The optional `session=<id>` is the Claude Code session the hook ran in, so
+//! a reload can resume it in the same pane. Letters, digits and `-` only: it
+//! ends up in a shell command. Sent from `ROOST_PROTOCOL` 3.
 
 const std = @import("std");
 
@@ -45,6 +49,8 @@ pub const Message = struct {
     pane: ?u32 = null,
     /// The Claude Code hook that sent it; empty when the line didn't say.
     hook: []const u8 = "",
+    /// The Claude Code session it came from; empty when the line didn't say.
+    session: []const u8 = "",
     event: Event,
     /// The optional human-readable message; empty when there was none.
     text: []const u8 = "",
@@ -52,6 +58,9 @@ pub const Message = struct {
 
 const pane_prefix = "pane=";
 const hook_prefix = "hook=";
+const session_prefix = "session=";
+/// Longer than any Claude Code session id (a 36-character UUID).
+pub const max_session_len = 64;
 
 /// Parse one message line. Null for an empty line, an unknown event, or a
 /// malformed `pane=` prefix. A bad prefix drops the whole line rather than
@@ -70,12 +79,27 @@ pub fn parse(line: []const u8) ?Message {
         msg.hook = tok[hook_prefix.len..];
         if (msg.hook.len == 0) return null;
     }
+    if (std.mem.startsWith(u8, rest, session_prefix)) {
+        const tok = nextToken(&rest);
+        msg.session = tok[session_prefix.len..];
+        if (!validSession(msg.session)) return null;
+    }
 
     const tok = nextToken(&rest);
     if (tok.len == 0) return null;
     msg.event = Event.fromToken(tok) orelse return null;
     msg.text = rest;
     return msg;
+}
+
+/// A session id Roost will put in a shell command: 1 to `max_session_len`
+/// letters, digits and dashes.
+pub fn validSession(id: []const u8) bool {
+    if (id.len == 0 or id.len > max_session_len) return false;
+    for (id) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    return true;
 }
 
 /// Split the first space-delimited token off `rest`, leaving `rest` trimmed.
@@ -141,6 +165,20 @@ test "parse: hook name, after the pane or alone" {
     try testing.expectEqual(@as(?Message, null), parse("hook=Stop"));
     // Order is fixed: pane first.
     try testing.expectEqual(@as(?Message, null), parse("hook=Stop pane=1 done"));
+}
+
+test "parse: session id, and ones unsafe for a shell" {
+    const m = parse("pane=2 hook=Stop session=710c01ad-878d-4d96-a33a-4911a1356ea4 done").?;
+    try testing.expectEqual(@as(?u32, 2), m.pane);
+    try testing.expectEqualStrings("Stop", m.hook);
+    try testing.expectEqualStrings("710c01ad-878d-4d96-a33a-4911a1356ea4", m.session);
+    try testing.expectEqual(Event.done, m.event);
+
+    try testing.expectEqual(@as(?Message, null), parse("session= done"));
+    try testing.expectEqual(@as(?Message, null), parse("session=a;rm done"));
+    try testing.expectEqual(@as(?Message, null), parse("session=$(x) done"));
+    try testing.expectEqual(@as(?Message, null), parse("session=" ++ "a" ** 65 ++ " done"));
+    try testing.expect(parse("session=" ++ "a" ** 64 ++ " done") != null);
 }
 
 test "parse: the prefix only counts as the first token" {

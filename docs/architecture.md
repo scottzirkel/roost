@@ -128,6 +128,12 @@ belongs in `core/`; anything that touches a widget stays outside it.
   place, so a fresh build takes over the same window. It re-execs `argv[0]`,
   not `/proc/self/exe`, because after a rebuild that link points to the
   deleted old file.
+- **Reload keeps the agent's conversation.** Each Agent pane remembers the
+  Claude session its hooks last reported. Reload passes the sessions to the
+  new image in `ROOST_RESUME_SESSIONS`, one per Agent pane in tree order. The
+  restored panes then start `claude --resume <id> || claude`, so a session
+  Claude can't find falls back to a fresh one instead of closing the pane. The
+  variable is cleared at startup, so new windows and later panes start fresh.
 
 ## Agent awareness
 
@@ -142,11 +148,12 @@ reading only fills the gaps.
   path as `ROOST_SOCK`. Each terminal pane also gets its own `ROOST_PANE`
   number.
 - Claude Code hooks run `scripts/roost-notify`, which sends one line:
-  `[pane=<id>] [hook=<Event>] <event> [message]`. Events are `working`,
-  `needs-input` and `done`; `core/hook_msg.zig` parses them. `hook=` names the
-  Claude Code hook that ran. Roost exports `ROOST_PROTOCOL=2` to say it
-  understands that field, because an older Roost drops a line with a field it
-  doesn't know.
+  `[pane=<id>] [hook=<Event>] [session=<id>] <event> [message]`. Events are
+  `working`, `needs-input` and `done`; `core/hook_msg.zig` parses them.
+  `hook=` names the Claude Code hook that ran, and `session=` the Claude
+  session, for reload. Roost exports `ROOST_PROTOCOL=3` to say which fields it
+  understands, because an older Roost drops a line with a field it doesn't
+  know.
 - The event updates that pane's badge. An unknown pane, or a non-Agent pane,
   changes no badge but still gets its popup. A line with no pane id goes to the
   first Agent pane.
