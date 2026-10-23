@@ -4,7 +4,7 @@
 | --- | --- |
 | [`roost-notify`](#roost-notify--agent-hooks) | Lets Claude Code's hooks tell Roost what the agent is doing. |
 | [`claude-hooks.json`](#roost-notify--agent-hooks) | The hook snippet to merge into `~/.claude/settings.json`. |
-| [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal. |
+| [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal, or runs `roost status`. |
 | [`roost.desktop`](#roostdesktop--the-desktop-launcher) | The desktop launcher entry. |
 | [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
 | [`check-core.sh`](#check-coresh--the-core-purity-check) | Fails the build if `src/roost/core/` imports a UI toolkit. |
@@ -140,6 +140,10 @@ terminal.
 ```sh
 ln -sfn /path/to/roost/scripts/roost-launch ~/.local/bin/roost
 ```
+
+Commands such as `roost status` skip all of that: they go straight to the
+binary, open no window and close nothing, so an agent or a desktop bar can run
+them.
 
 Output and startup errors go to `${XDG_STATE_HOME:-~/.local/state}/roost.log`.
 If the binary is missing, the wrapper fails before closing the terminal, so a

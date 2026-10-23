@@ -22,6 +22,10 @@
 //!     session=<id> done -> the same, from that Claude session (for reload)
 //! Unknown events are ignored. Parsing lives in `core/hook_msg.zig`.
 //!
+//! The same socket answers requests (`core/control.zig`): a `status` line gets
+//! one line of JSON back with the window's project, branch and agent state.
+//! That's how `roost status` and the desktop bar see every window.
+//!
 //! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
 //! that's installed never has, the server warns once with a notification.
 //!
@@ -44,6 +48,8 @@ const Config = @import("config.zig").Config;
 const Project = @import("project.zig").Project;
 const hook_msg = @import("core/hook_msg.zig");
 const claude_hooks = @import("core/claude_hooks.zig");
+const control = @import("core/control.zig");
+const git_head = @import("core/git_head.zig");
 
 const log = std.log.scoped(.roost_ipc);
 
@@ -224,7 +230,78 @@ pub const Server = struct {
         const n = istream.readFinish(res, &gerr);
         if (n <= 0) return; // EOF or error: nothing usable.
         const msg = std.mem.trim(u8, ctx.buf[0..@intCast(n)], " \t\r\n");
+        if (control.Request.parse(msg)) |req| {
+            ctx.server.answer(ctx.connection, req);
+            return;
+        }
         ctx.server.handle(msg);
+    }
+
+    /// Heap context for an in-flight async reply: keeps the connection alive
+    /// and owns the reply until the write completes.
+    const WriteCtx = struct {
+        server: *Server,
+        connection: *gio.SocketConnection,
+        reply: []u8,
+    };
+
+    /// Answer a control request on its own connection, then close it. The
+    /// write is asynchronous for the same reason the read is: a client that
+    /// asks and never reads must not stall the window.
+    fn answer(self: *Server, connection: *gio.SocketConnection, req: control.Request) void {
+        var buf: [std.fs.max_path_bytes * 2 + 256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        switch (req) {
+            .status => {
+                var branch_buf: [256]u8 = undefined;
+                self.statusReply(&branch_buf).write(&w) catch return;
+            },
+        }
+        const ctx = self.alloc.create(WriteCtx) catch return;
+        ctx.* = .{
+            .server = self,
+            .connection = connection,
+            .reply = self.alloc.dupe(u8, w.buffered()) catch {
+                self.alloc.destroy(ctx);
+                return;
+            },
+        };
+        // Released in onWriteComplete, like the read's ref.
+        _ = connection.as(gobject.Object).ref();
+        const ostream = connection.as(gio.IOStream).getOutputStream();
+        ostream.writeAllAsync(ctx.reply.ptr, ctx.reply.len, 0, null, onWriteComplete, ctx);
+    }
+
+    fn onWriteComplete(_: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const ctx: *WriteCtx = @ptrCast(@alignCast(data.?));
+        defer {
+            ctx.connection.as(gobject.Object).unref();
+            ctx.server.alloc.free(ctx.reply);
+            ctx.server.alloc.destroy(ctx);
+        }
+        const ostream = ctx.connection.as(gio.IOStream).getOutputStream();
+        var gerr: ?*glib.Error = null;
+        defer if (gerr) |e| e.free();
+        // A client that hung up early is its own business; nothing to undo.
+        _ = ostream.writeAllFinish(res, null, &gerr);
+    }
+
+    /// This window's answer to `status`. The branch lives in `branch_buf`.
+    fn statusReply(self: *Server, branch_buf: []u8) control.Status {
+        const proj = self.project;
+        return .{
+            .pid = std.os.linux.getpid(),
+            .project = if (proj) |p| p.path else "",
+            .name = if (proj) |p| p.displayName() else "",
+            .branch = if (proj) |p| git_head.branch(branch_buf, p.path) orelse "" else "",
+            .state = switch (self.workspace.agentAttention()) {
+                .blocked => .needs_input,
+                .done => .done,
+                .working => .working,
+                .idle => .idle,
+                .unknown => .unknown,
+            },
+        };
     }
 
     /// Parse + act on one message line. Public for direct unit-style exercise.

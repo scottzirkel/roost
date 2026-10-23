@@ -5,16 +5,17 @@ things work lives in [docs/architecture.md](docs/architecture.md).
 
 Last updated 2026-10-23.
 
-## Now: a Waybar indicator
+## Now: a bar indicator
 
-See every window's agent state from the bar, and jump to the window that needs
-you.
+See every window's agent state from the desktop bar, and jump to any window.
 
-- [ ] The socket answers requests, starting with `status`: the window's
+- [x] The socket answers requests, starting with `status`: the window's
       project, branch and agent state.
-- [ ] `roost status --all` asks every running window.
-- [ ] A Waybar module shows 🔔 and ● counts. Clicking it focuses the window
-      that needs you.
+- [x] `roost status --all` asks every running window.
+- [ ] An Omarchy bar widget shows 🔔 and ● counts and lists every window.
+      Clicking one focuses it. Omarchy's own shell has replaced Waybar, so
+      the widget is an Omarchy plugin; `roost status --all --watch` works
+      for any other bar.
 
 This is the first slice of the control API below: the same socket and the same
 message format.
@@ -29,7 +30,6 @@ window:
 - `roost open path:line` jumps the Editor pane to a file and line.
 - `roost run <action> --wait` runs one of your wired actions and returns its
   exit code. It can only run actions you defined, never arbitrary commands.
-- `roost status` reports the window's project, branch and agent state.
 
 The agent learns the commands from a short note in the project's `CLAUDE.md`.
 The message format lives in `src/roost/core/`, so the Mac app can reuse it.

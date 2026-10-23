@@ -134,6 +134,26 @@ directory — every pane (including lazygit) launches there. Every window is its
 own process, so one can't take down another. The **desktop entry** opens your
 last project, or the project chooser if Roost is already running.
 
+### Window status
+
+`roost status` shows a window's project, branch and agent state, without
+opening a window:
+
+```sh
+roost status                 # the window this pane is in
+roost status --all           # every running window
+roost status --all --json    # the same, as one line of JSON
+roost status --all --watch   # JSON now and on every change, for a desktop bar
+```
+
+```text
+🔔 roost · main — needs you
+● my-app · fix-login — working
+```
+
+A window running an older build doesn't answer; it's listed until you reload
+it.
+
 ### Keybindings
 
 | Key | Action |

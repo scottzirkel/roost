@@ -22,6 +22,14 @@ set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 bin="$here/../vendor/ghostty/zig-out/bin/roost"
 
+# Commands like `roost status` ask running windows and print the answer. They
+# go straight to the binary: no new window, and no hanging up the caller, which
+# may be an agent's shell or the desktop bar. Keep in sync with `isCommand` in
+# src/roost/cli.zig.
+case "${1-}" in
+  status) exec "$bin" "$@" ;;
+esac
+
 log="${XDG_STATE_HOME:-$HOME/.local/state}/roost.log"
 mkdir -p "$(dirname "$log")"
 

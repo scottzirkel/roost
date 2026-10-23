@@ -16,7 +16,7 @@ ZIG="${ZIG:-$(command -v zig || echo "$HOME/.local/bin/zig")}"
 "$root/scripts/check-core.sh"
 
 files=("$root"/src/roost/core/*.zig)
-files+=("$root/src/roost/actions.zig" "$root/src/roost/md.zig" "$root/src/roost/ansi.zig")
+files+=("$root/src/roost/actions.zig" "$root/src/roost/md.zig" "$root/src/roost/ansi.zig" "$root/src/roost/cli.zig")
 
 for f in "${files[@]}"; do
   echo "==> zig test ${f#"$root/"}"

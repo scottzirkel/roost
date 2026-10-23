@@ -16,8 +16,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const app = @import("roost/app.zig");
+const cli = @import("roost/cli.zig");
 
 pub fn main() !void {
+    // `roost status` and friends answer and exit without opening a window.
+    if (cli.command()) |code| std.process.exit(code);
     try app.run();
 }
 
