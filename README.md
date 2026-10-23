@@ -178,13 +178,15 @@ and keeps a backup of the old file. By hand, the hooks look like this:
   "Stop":             [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify done" }] }],
   "Notification":     [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify needs-input" }] }],
   "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true }] }],
-  "PostToolBatch":    [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true }] }]
+  "PostToolBatch":    [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true }] }],
+  "SessionStart":     [{ "hooks": [{ "type": "command", "command": "/path/to/roost/scripts/roost-notify session" }] }]
 }
 ```
 
 The two `working` hooks matter: once a hook has reported, Roost stops reading
 that pane's screen, so without them the badge would stay on `✓ done` through
-the next run.
+the next run. `SessionStart` tells Roost which conversation the pane holds, so
+Reload can resume it, even right after a `/resume`.
 
 Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can

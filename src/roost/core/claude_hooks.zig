@@ -34,7 +34,8 @@ pub const Hook = struct {
     /// What it tells Roost, for the Settings row.
     purpose: []const u8,
     /// Run without making the agent wait. Set for the frequent `working`
-    /// events; `done` and `needs-input` are rare enough to run in line.
+    /// events; the others are rare enough to run in line. (Claude Code runs
+    /// SessionStart in the background anyway.)
     is_async: bool,
 };
 
@@ -44,6 +45,10 @@ pub const required = [_]Hook{
     .{ .event = "Notification", .arg = "needs-input", .purpose = "Agent needs you: 🔔", .is_async = false },
     .{ .event = "UserPromptSubmit", .arg = "working", .purpose = "You sent a prompt: ● working", .is_async = true },
     .{ .event = "PostToolBatch", .arg = "working", .purpose = "Tools finished: ● working", .is_async = true },
+    // Fires on start, --resume, /resume and /clear, so Roost knows the
+    // conversation before any prompt. Without it, Reload right after a
+    // /resume had no session to resume.
+    .{ .event = "SessionStart", .arg = "session", .purpose = "Conversation started or resumed: Reload picks it up", .is_async = false },
 };
 
 /// The index of `event` in `required`.
@@ -374,6 +379,9 @@ const full =
     \\    ],
     \\    "PostToolBatch": [
     \\      { "hooks": [ { "type": "command", "command": "/opt/roost/scripts/roost-notify working", "async": true } ] }
+    \\    ],
+    \\    "SessionStart": [
+    \\      { "hooks": [ { "type": "command", "command": "/opt/roost/scripts/roost-notify session" } ] }
     \\    ]
     \\  }
     \\}
@@ -396,10 +404,11 @@ test "check: the 2026 install had no working hooks" {
         \\  "Notification": [{"hooks": [{"type": "command", "command": "~/roost/scripts/roost-notify needs-input"}]}]
         \\}}
     );
-    try testing.expectEqual(@as(usize, 2), s.missingCount());
+    try testing.expectEqual(@as(usize, 3), s.missingCount());
     try testing.expectEqualStrings("~/roost/scripts/roost-notify", s.scripts[0].?);
     try testing.expectEqual(@as(?[]const u8, null), s.scripts[2]);
     try testing.expectEqual(@as(?[]const u8, null), s.scripts[3]);
+    try testing.expectEqual(@as(?[]const u8, null), s.scripts[4]);
 }
 
 test "check: no file content worth reading" {
@@ -438,7 +447,8 @@ test "check: quoting, wrappers, chains and a bare roost-notify" {
         \\  ]}],
         \\  "Notification": [{"hooks": [{"type": "command", "command": "python3 $HOME/r/roost-notify needs-input"}]}],
         \\  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/r/roost-notify; true"}]}],
-        \\  "PostToolBatch": [{"hooks": [{"type": "command", "command": "/a/roost-notify done&&/b/roost-notify working"}]}]
+        \\  "PostToolBatch": [{"hooks": [{"type": "command", "command": "/a/roost-notify done&&/b/roost-notify working"}]}],
+        \\  "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command", "command": "/s/roost-notify session >/dev/null"}]}]
         \\}}
     );
     try testing.expectEqual(@as(usize, 0), s.missingCount());
@@ -446,6 +456,7 @@ test "check: quoting, wrappers, chains and a bare roost-notify" {
     try testing.expectEqualStrings("$HOME/r/roost-notify", s.scripts[1].?);
     try testing.expectEqualStrings("/r/roost-notify", s.scripts[2].?);
     try testing.expectEqualStrings("/b/roost-notify", s.scripts[3].?);
+    try testing.expectEqualStrings("/s/roost-notify", s.scripts[4].?);
 }
 
 test "merge: a project's settings fill the user's gaps" {
@@ -457,7 +468,7 @@ test "merge: a project's settings fill the user's gaps" {
     user.merge(proj);
     try testing.expectEqualStrings("/u/roost-notify", user.scripts[0].?);
     try testing.expectEqualStrings("/p/roost-notify", user.scripts[2].?);
-    try testing.expectEqual(@as(usize, 2), user.missingCount());
+    try testing.expectEqual(@as(usize, 3), user.missingCount());
 }
 
 test "liveness: runs that add up, and the two that don't" {
@@ -470,9 +481,11 @@ test "liveness: runs that add up, and the two that don't" {
         l.record("PostToolBatch");
         l.record("Stop");
     }
-    l.record("SessionStart"); // not ours: ignored
+    l.record("SessionStart");
+    l.record("PreToolUse"); // not ours: ignored
     try testing.expectEqual(@as(?usize, null), l.silent());
     try testing.expectEqual(@as(u32, 4), l.runs[indexOf("Stop")]);
+    try testing.expectEqual(@as(u32, 1), l.runs[indexOf("SessionStart")]);
 
     // Turns finish, but no prompt ever arrived (the 2026 failure).
     var no_prompt: Liveness = .{};
@@ -554,10 +567,11 @@ test "add: appends the missing hooks and keeps everything else" {
         \\}
         \\
     , after);
-    // Notification was never there and wasn't asked for.
+    // Notification and SessionStart were never there and weren't asked for.
     const s = try check(a, after);
-    try testing.expectEqual(@as(usize, 1), s.missingCount());
+    try testing.expectEqual(@as(usize, 2), s.missingCount());
     try testing.expectEqual(@as(?[]const u8, null), s.scripts[1]);
+    try testing.expectEqual(@as(?[]const u8, null), s.scripts[4]);
 }
 
 test "add: an empty list round-trips Claude Code's own format unchanged" {

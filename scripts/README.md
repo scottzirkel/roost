@@ -25,7 +25,7 @@ desktop notification and a status badge when the agent finishes or needs you.
    its own **`ROOST_PANE`**, a number that names that pane.
 2. `roost-notify` connects to `$ROOST_SOCK` and writes one short line:
    `[pane=<id>] [hook=<Event>] [session=<id>] <event> [message]`, where
-   `<event>` is `done`, `needs-input` or `working`, and `pane=` is
+   `<event>` is `done`, `needs-input`, `working` or `session`, and `pane=` is
    `$ROOST_PANE`. `hook=` names the Claude Code hook that ran, so Roost can
    tell which hooks actually run. `session=` is the Claude session, so a reload
    can resume it. Each is only sent when the pane's `ROOST_PROTOCOL` is new
@@ -59,8 +59,8 @@ By hand:
 
    - With no `hooks` key yet, copy the whole `"hooks": { ... }` object in.
    - With an existing `hooks` key, merge by event: append our `Stop`,
-     `Notification`, `UserPromptSubmit` and `PostToolBatch` entries to your
-     arrays for those events.
+     `Notification`, `UserPromptSubmit`, `PostToolBatch` and `SessionStart`
+     entries to your arrays for those events.
    - Replace `/ABSOLUTE/PATH/TO/scripts` with the real path.
 
    A minimal merged result:
@@ -79,6 +79,9 @@ By hand:
        ],
        "PostToolBatch": [
          { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true } ] }
+       ],
+       "SessionStart": [
+         { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify session" } ] }
        ]
      }
    }
@@ -95,6 +98,12 @@ By hand:
      a hook has reported, so without these the badge would stay on `✓ done`
      during the next run, and `🔔` would stay up after you answer. `async`
      keeps them from slowing the agent down.
+   - **`SessionStart`** fires when a conversation starts, or comes back with
+     `--resume`, `/resume` or `/clear`. It only tells Roost the session id, so
+     Reload can resume it; the badge doesn't change. Without it, Roost learns
+     the session from the next prompt, so a reload right after `/resume` starts
+     a fresh conversation. Claude Code adds this hook's output to the
+     conversation, which is why `roost-notify` never prints anything.
 
 ### Manual test
 

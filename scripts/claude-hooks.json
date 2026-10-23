@@ -44,6 +44,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABSOLUTE/PATH/TO/scripts/roost-notify session"
+          }
+        ]
+      }
     ]
   }
 }

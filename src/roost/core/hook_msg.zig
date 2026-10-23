@@ -7,7 +7,9 @@
 //!
 //! FORMAT:
 //!     [pane=<id>] [hook=<Event>] [session=<id>] <event> [message...]
-//! `event` is `working`, `needs-input` or `done`; anything else is ignored.
+//! `event` is `working`, `needs-input`, `done` or `session`; anything else is
+//! ignored. `session` only records the conversation (from Claude Code's
+//! SessionStart hook) and changes no badge.
 //!
 //! The optional leading `pane=<id>` says WHICH pane the agent runs in. Roost
 //! exports a per-pane `ROOST_PANE` into every terminal pane, and roost-notify
@@ -34,11 +36,14 @@ pub const Event = enum {
     working,
     needs_input,
     done,
+    /// A conversation started or resumed: only `Message.session` matters.
+    session,
 
     fn fromToken(tok: []const u8) ?Event {
         if (std.mem.eql(u8, tok, "working")) return .working;
         if (std.mem.eql(u8, tok, "needs-input")) return .needs_input;
         if (std.mem.eql(u8, tok, "done")) return .done;
+        if (std.mem.eql(u8, tok, "session")) return .session;
         return null;
     }
 };
@@ -179,6 +184,11 @@ test "parse: session id, and ones unsafe for a shell" {
     try testing.expectEqual(@as(?Message, null), parse("session=$(x) done"));
     try testing.expectEqual(@as(?Message, null), parse("session=" ++ "a" ** 65 ++ " done"));
     try testing.expect(parse("session=" ++ "a" ** 64 ++ " done") != null);
+
+    // SessionStart's line: just the session, no badge change.
+    const start = parse("pane=1 hook=SessionStart session=abc-123 session").?;
+    try testing.expectEqual(Event.session, start.event);
+    try testing.expectEqualStrings("abc-123", start.session);
 }
 
 test "parse: the prefix only counts as the first token" {

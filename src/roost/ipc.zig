@@ -48,11 +48,13 @@ const claude_hooks = @import("core/claude_hooks.zig");
 const log = std.log.scoped(.roost_ipc);
 
 /// Map a hook event to the tree/workspace badge status.
-fn statusOf(event: hook_msg.Event) layout.AgentStatus {
+/// The badge an event sets; null for one that leaves the badge alone.
+fn statusOf(event: hook_msg.Event) ?layout.AgentStatus {
     return switch (event) {
         .working => .working,
         .needs_input => .needs_input,
         .done => .done,
+        .session => null,
     };
 }
 
@@ -249,14 +251,14 @@ pub const Server = struct {
             }
         }
 
-        // Update the sender's Agent-pane badge for every known event.
-        self.workspace.setAgentStatus(msg.pane, statusOf(msg.event));
+        // Update the sender's Agent-pane badge for every event that sets one.
+        if (statusOf(msg.event)) |status| self.workspace.setAgentStatus(msg.pane, status);
         if (msg.session.len > 0) self.workspace.setAgentSession(msg.pane, msg.session);
 
         // Notify (+ optional sound) for the attention-worthy events only. An
         // agent in a Shell pane gets no badge, but still gets its popup.
         switch (msg.event) {
-            .working => {},
+            .working, .session => {},
             .needs_input => {
                 self.notify("Agent needs you", if (rest.len > 0) rest else "Your agent is waiting for input.");
                 self.playSound("message");

@@ -129,7 +129,9 @@ belongs in `core/`; anything that touches a widget stays outside it.
   not `/proc/self/exe`, because after a rebuild that link points to the
   deleted old file.
 - **Reload keeps the agent's conversation.** Each Agent pane remembers the
-  Claude session its hooks last reported. Reload passes the sessions to the
+  Claude session its hooks last reported. The SessionStart hook reports it as
+  soon as a conversation starts or is resumed; without it, a reload before the
+  first prompt would have no session to resume. Reload passes the sessions to the
   new image in `ROOST_RESUME_SESSIONS`, one per Agent pane in tree order. The
   restored panes then start `claude --resume <id> || claude`, so a session
   Claude can't find falls back to a fresh one instead of closing the pane. The
@@ -149,7 +151,8 @@ reading only fills the gaps.
   number.
 - Claude Code hooks run `scripts/roost-notify`, which sends one line:
   `[pane=<id>] [hook=<Event>] [session=<id>] <event> [message]`. Events are
-  `working`, `needs-input` and `done`; `core/hook_msg.zig` parses them.
+  `working`, `needs-input`, `done` and `session`, which only records the
+  session; `core/hook_msg.zig` parses them.
   `hook=` names the Claude Code hook that ran, and `session=` the Claude
   session, for reload. Roost exports `ROOST_PROTOCOL=3` to say which fields it
   understands, because an older Roost drops a line with a field it doesn't

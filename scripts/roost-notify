@@ -9,7 +9,12 @@ remainder is an optional human-readable message:
     roost-notify needs-input "Approve this edit?"
     roost-notify working
 
-Recognized events (anything else is ignored by roost): done | needs-input | working
+Recognized events (anything else is ignored by roost): done | needs-input | working | session
+
+`session` comes from Claude Code's SessionStart hook. It only tells Roost the
+conversation's session id, so a reload can resume it, and changes no badge.
+Claude Code adds a SessionStart hook's stdout to the conversation, so this
+script must never print anything.
 
 When $ROOST_PANE is set (Roost exports it into each pane), the line is led by
 "pane=<id> ", so the window updates the badge of the pane the agent actually
@@ -79,6 +84,9 @@ def main() -> int:
     session = str(payload.get("session_id", ""))
     if protocol() >= 3 and 0 < len(session) <= 64 and session.isascii() and session.replace("-", "").isalnum():
         line = f"session={session} {line}"
+    elif event == "session":
+        # Nothing to record, and an older Roost doesn't know the event.
+        return 0
     # One plain word, or Roost would drop the whole line.
     hook = str(payload.get("hook_event_name", ""))
     if hook.isascii() and hook.isalnum() and protocol() >= 2:
