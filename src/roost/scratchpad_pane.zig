@@ -12,14 +12,16 @@
 //! (dimmed) so they stay editable — Typora's "source on the active block". We
 //! only ever apply/remove tags; the buffer text is never mutated, so autosave
 //! and `copyTextToSend` always see the raw markdown. Tag colors are derived from
-//! the live GTK theme — the foreground (`getColor`) for dim/quote text and the
-//! named accent color (`themeAccent`, Catppuccin's accent on Omarchy) for
-//! headings and inline code — so they follow the system theme; the base font
-//! comes from a `.roost-scratchpad` CSS class (see app.zig).
+//! the live theme — the foreground (`getColor`) for dim/quote text and the
+//! system accent color (`themeAccent`, via libadwaita) for headings and inline
+//! code — and are re-derived when the accent or light/dark mode changes, so
+//! they follow the system theme; the base font comes from a `.roost-scratchpad`
+//! CSS class (see app.zig).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const adw = @import("adw");
 const gtk = @import("gtk");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -68,6 +70,11 @@ pub const ScratchpadPane = struct {
     autosave: bool,
     /// Pending debounced-save GLib source id (0 = none scheduled).
     save_source: c_uint = 0,
+    /// Pending theme-change restyle (idle source id, 0 = none scheduled).
+    restyle_source: c_uint = 0,
+    /// `notify::accent-color` / `notify::dark` handlers on the app-wide
+    /// AdwStyleManager, which outlives this pane; disconnected in `destroy`.
+    style_handlers: [2]c_ulong = .{ 0, 0 },
     /// Cursor line last styled for; lets `mark-set` skip restyles that don't
     /// change which line reveals its markers. -1 = not yet styled.
     styled_line: c_int = -1,
@@ -137,6 +144,13 @@ pub const ScratchpadPane = struct {
         // after the widget is in a display, so the loaded text gets correct
         // marker/code colors then.
         _ = gtk.Widget.signals.realize.connect(self.text_view.as(gtk.Widget), *ScratchpadPane, onRealize, self, .{});
+        // Re-style when the system accent or light/dark mode changes; otherwise
+        // headings keep the old theme's colors until the next edit.
+        const sm = adw.StyleManager.getDefault();
+        self.style_handlers = .{
+            gobject.Object.signals.notify.connect(sm, *ScratchpadPane, onStyleChanged, self, .{ .detail = "accent-color" }),
+            gobject.Object.signals.notify.connect(sm, *ScratchpadPane, onStyleChanged, self, .{ .detail = "dark" }),
+        };
         // Debounced autosave, only when persisting.
         if (self.path != null and self.autosave) {
             _ = gtk.TextBuffer.signals.changed.connect(buffer, *ScratchpadPane, onChanged, self, .{});
@@ -150,6 +164,11 @@ pub const ScratchpadPane = struct {
     /// (pane close, layout reset, project switch, clean exit) so the last edits
     /// in the debounce window are never lost.
     pub fn destroy(self: *ScratchpadPane) void {
+        const sm = adw.StyleManager.getDefault();
+        for (self.style_handlers) |id| {
+            if (id != 0) gobject.signalHandlerDisconnect(sm.as(gobject.Object), id);
+        }
+        if (self.restyle_source != 0) _ = glib.Source.remove(self.restyle_source);
         if (self.save_source != 0) {
             _ = glib.Source.remove(self.save_source);
             self.save_source = 0;
@@ -215,11 +234,9 @@ pub const ScratchpadPane = struct {
         // Refresh theme-derived colors so a light/dark switch is picked up.
         var fg: gdk.RGBA = undefined;
         self.text_view.as(gtk.Widget).getColor(&fg);
-        // The active GTK/libadwaita theme's accent color (Catppuccin's accent on
-        // Omarchy) — used to tint headings and inline code so the scratchpad
-        // tracks the system theme. Falls back to the plain foreground when the
-        // theme exposes no named accent (so headings still render, just uncolored).
-        var accent = themeAccent(self.text_view.as(gtk.Widget), fg);
+        // The system accent color — used to tint headings and inline code so
+        // the scratchpad tracks the system theme.
+        var accent = themeAccent();
         var dim = fg;
         dim.f_alpha = 0.40;
         var quote_fg = fg;
@@ -274,6 +291,20 @@ pub const ScratchpadPane = struct {
 
     fn onRealize(_: *gtk.Widget, self: *ScratchpadPane) callconv(.c) void {
         self.restyle();
+    }
+
+    /// Accent or light/dark change. Restyles from idle rather than right here,
+    /// so `getColor` reads the text color after the new stylesheet applies.
+    fn onStyleChanged(_: *adw.StyleManager, _: *gobject.ParamSpec, self: *ScratchpadPane) callconv(.c) void {
+        if (self.restyle_source != 0) return;
+        self.restyle_source = glib.idleAdd(onRestyleIdle, self);
+    }
+
+    fn onRestyleIdle(data: ?*anyopaque) callconv(.c) c_int {
+        const self: *ScratchpadPane = @ptrCast(@alignCast(data.?));
+        self.restyle_source = 0;
+        self.restyle();
+        return 0; // G_SOURCE_REMOVE — one-shot.
     }
 
     // --- autosave ---------------------------------------------------------
@@ -356,20 +387,20 @@ pub const ScratchpadPane = struct {
     }
 };
 
-/// Resolve the active theme's accent color from `widget`'s style context,
-/// returning `fallback` (the plain foreground) when the theme defines none. Tries
-/// the libadwaita standalone accent first (meant for text on the window
-/// background — ideal for headings), then the bg/legacy names. `getStyleContext`
-/// is deprecated in GTK4 but is still the only way to resolve a named theme color
-/// for an arbitrary widget.
-fn themeAccent(widget: *gtk.Widget, fallback: gdk.RGBA) gdk.RGBA {
-    const ctx = widget.getStyleContext();
-    const names = [_][*:0]const u8{ "accent_color", "accent_bg_color", "theme_selected_bg_color" };
-    for (names) |name| {
-        var rgba: gdk.RGBA = undefined;
-        if (ctx.lookupColor(name, &rgba) != 0) return rgba;
-    }
-    return fallback;
+/// The system accent color in its "standalone" form, the variant meant for
+/// text on the window background (ideal for headings), for the current light
+/// or dark mode. Comes from libadwaita's style manager, which follows the
+/// desktop's accent setting.
+///
+/// Not `GtkStyleContext.lookupColor("accent_color")`, which this used before:
+/// libadwaita 1.6+ defines that named color through a CSS variable the lookup
+/// can't resolve, so it reported success and returned opaque black. Headings
+/// turned black on a dark theme.
+fn themeAccent() gdk.RGBA {
+    const sm = adw.StyleManager.getDefault();
+    var rgba: gdk.RGBA = undefined;
+    sm.getAccentColor().toStandaloneRgba(sm.getDark(), &rgba);
+    return rgba;
 }
 
 /// Create the reusable styling tags on `buffer`'s tag table. Anonymous (we apply
