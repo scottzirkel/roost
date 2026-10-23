@@ -266,6 +266,11 @@ pub const Server = struct {
     /// `gio.Notification`, set body + themed icon, send via the GApplication.
     /// Delegates to the shared `notifyApp` (the wired-actions runner uses it too)
     /// with the stable id "roost-agent" so a newer agent event REPLACES the old.
+    /// The id is per PROCESS, so this never reaches another window's popup: gio's
+    /// freedesktop backend remembers which daemon notification each id produced
+    /// in this process only, and every Roost window is its own process. (Checked
+    /// against GLib 2.90 with two processes sharing the id: the second one's
+    /// first Notify went out with replaces_id=0.)
     ///
     /// The title is prefixed with the project name ("roost — Agent needs you"),
     /// because the popup is the one place Roost speaks to you with no window
