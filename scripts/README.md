@@ -1,124 +1,140 @@
 # Roost scripts
 
-## `roost-launch` — the CLI launcher
+| Script | What it's for |
+| --- | --- |
+| [`roost-notify`](#roost-notify--agent-hooks) | Lets Claude Code's hooks tell Roost what the agent is doing. |
+| [`claude-hooks.json`](#roost-notify--agent-hooks) | The hook snippet to merge into `~/.claude/settings.json`. |
+| [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal. |
+| [`roost.desktop`](#roostdesktop--the-desktop-launcher) | The desktop launcher entry. |
+| [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
+| [`check-core.sh`](#check-coresh--the-core-purity-check) | Fails the build if `src/roost/core/` imports a UI toolkit. |
+| [`patch-zig-linker.sh`](#patch-zig-linkersh--arch-linker-workaround) | Works around an Arch + Zig 0.15.2 linker bug. |
 
-Makes the `roost` CLI a pure launcher. It starts Roost in its own session
-(`setsid`) so it outlives the terminal, inherits the current directory (so
-`cd project && roost` still selects that project), and then closes the launching
-terminal — you're moving into Roost for the session.
+Paths below use `/path/to/roost` for your clone.
 
-Install: put it on your `PATH` as `roost`:
+## `roost-notify` — agent hooks
 
-```sh
-ln -sfn /home/scott/projects/roost/scripts/roost-launch ~/.local/bin/roost
-```
+Wires **Claude Code** into the Roost window, so the Agent pane raises a native
+desktop notification and a status badge when the agent finishes or needs you.
 
-Detached output (and any startup errors) goes to
-`${XDG_STATE_HOME:-~/.local/state}/roost.log`. If the binary is missing the
-wrapper fails before closing the terminal, so a broken launch is never hidden.
-To launch **without** closing the terminal (e.g. while developing), run the
-binary directly: `vendor/ghostty/zig-out/bin/roost`. The desktop launcher
-(`roost.desktop`) points at the binary directly and does not use this wrapper.
+### How it works
 
-## `install-icon.sh` — the app icon
-
-Installs the Roost app icon (`dev.scottzirkel.Roost`) into your hicolor icon
-theme so the launcher, taskbar, Alt-Tab, and the notification fallback render it
-instead of a generic icon. The icon is the **square variant of the official
-Roost logo** (`src/roost/icons/scalable/apps/dev.scottzirkel.Roost.svg`, the same
-art as `docs/logo-square.svg`); the script renders it to PNGs at the standard
-sizes plus the SVG, under `${XDG_DATA_HOME:-~/.local/share}/icons/hicolor`.
-
-```sh
-/home/scott/projects/roost/scripts/install-icon.sh
-```
-
-Idempotent; re-run after editing the SVG. Requires `rsvg-convert` (librsvg). The
-`.desktop` file already points at this icon (`Icon=dev.scottzirkel.Roost`).
-
-# Roost agent integration scripts
-
-These wire **Claude Code** into the Roost window so the Agent pane can raise a
-native desktop notification and a status badge when the agent finishes or needs
-you.
-
-## How it works
-
-1. When Roost starts it opens a Unix-domain socket and exports its path as the
-   environment variable **`ROOST_SOCK`**. Every pane Roost spawns — including
-   the Agent pane that runs `claude` — inherits this variable. Each pane also
-   gets its own **`ROOST_PANE`**, a number that names that pane.
+1. When Roost starts it opens a Unix-domain socket and exports its path as
+   **`ROOST_SOCK`**. Every pane Roost spawns inherits it. Each pane also gets
+   its own **`ROOST_PANE`**, a number that names that pane.
 2. `roost-notify` connects to `$ROOST_SOCK` and writes one short line:
-   `[pane=<id>] <event> [message]`, where `<event>` is one of `done`,
-   `needs-input`, `working`, and `<id>` is `$ROOST_PANE`.
-3. Roost reacts: it shows a native notification (for `done` / `needs-input`)
-   and updates the header badge of the Agent pane the agent runs in. With two
-   agents in one window, each one's events update only its own badge. A line
-   without `pane=` (from a pane an older Roost build started) goes to the first
-   Agent pane.
+   `[pane=<id>] <event> [message]`, where `<event>` is `done`, `needs-input`
+   or `working`, and `<id>` is `$ROOST_PANE`.
+3. Roost shows a native notification (for `done` and `needs-input`) and updates
+   the badge of the Agent pane the agent runs in. A line without `pane=` goes
+   to the first Agent pane.
 
-If `ROOST_SOCK` is unset or the socket is gone, `roost-notify` does nothing
-and exits 0 — it can never break your agent.
+If `ROOST_SOCK` is unset or the socket is gone, `roost-notify` does nothing and
+exits 0, so it can never break your agent.
 
-## Install
+### Install
 
 1. Make the helper executable (once):
 
    ```sh
-   chmod +x /home/scott/projects/roost/scripts/roost-notify
+   chmod +x /path/to/roost/scripts/roost-notify
    ```
 
 2. Merge the `hooks` block from `claude-hooks.json` into your
-   `~/.claude/settings.json`. **Roost does NOT edit that file for you.**
+   `~/.claude/settings.json`. **Roost doesn't edit that file for you.**
 
-   - If you have no `hooks` key yet, copy the whole `"hooks": { ... }` object in.
-   - If you already have a `hooks` key, merge by event: append our `Stop`,
-     `Notification`, `UserPromptSubmit` and `PostToolBatch` entries into your
-     existing arrays for those events.
-   - Replace `/ABSOLUTE/PATH/TO/scripts` with the real absolute path, e.g.
-     `/home/scott/projects/roost/scripts`.
+   - With no `hooks` key yet, copy the whole `"hooks": { ... }` object in.
+   - With an existing `hooks` key, merge by event: append our `Stop`,
+     `Notification`, `UserPromptSubmit` and `PostToolBatch` entries to your
+     arrays for those events.
+   - Replace `/ABSOLUTE/PATH/TO/scripts` with the real path.
 
-   A minimal merged result looks like:
+   A minimal merged result:
 
    ```json
    {
      "hooks": {
        "Stop": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify done" } ] }
+         { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify done" } ] }
        ],
        "Notification": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify needs-input" } ] }
+         { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify needs-input" } ] }
        ],
        "UserPromptSubmit": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify working", "async": true } ] }
+         { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true } ] }
        ],
        "PostToolBatch": [
-         { "hooks": [ { "type": "command", "command": "/home/scott/projects/roost/scripts/roost-notify working", "async": true } ] }
+         { "hooks": [ { "type": "command", "command": "/path/to/roost/scripts/roost-notify working", "async": true } ] }
        ]
      }
    }
    ```
 
-   - **`Stop`** fires when Claude Code finishes a turn → `roost-notify done`
-     → notification "Agent finished" + badge `✓ done`.
-   - **`Notification`** fires when Claude Code wants your attention (permission
-     prompt, idle input request) → `roost-notify needs-input`. The hook's JSON
-     payload (delivered on stdin) carries a `message` field, which
-     `roost-notify` forwards as the notification body → badge `🔔 needs you`.
+   - **`Stop`** fires when Claude Code finishes a turn: notification "Agent
+     finished" and badge `✓ done`.
+   - **`Notification`** fires when Claude Code wants your attention, such as a
+     permission prompt. The hook's `message` becomes the notification body, and
+     the badge shows `🔔 needs you`.
    - **`UserPromptSubmit`** (you send a prompt) and **`PostToolBatch`** (a batch
-     of tool calls finished, including one you just approved) →
-     `roost-notify working` → badge `● working`, no notification. Without these,
-     a hooked pane keeps showing `✓ done` while the next run is underway, and
-     `🔔` stays up after you answer, because Roost stops reading a pane's screen
-     once a hook has reported. `async` keeps them from slowing the agent down.
+     of tool calls finished, including one you just approved) set the badge to
+     `● working`, with no notification. Roost stops reading a pane's screen once
+     a hook has reported, so without these the badge would stay on `✓ done`
+     during the next run, and `🔔` would stay up after you answer. `async`
+     keeps them from slowing the agent down.
 
-## Manual test
+### Manual test
 
 With Roost running, from any pane inside it:
 
 ```sh
-roost-notify needs-input "approve the migration?"
-roost-notify done
+/path/to/roost/scripts/roost-notify needs-input "approve the migration?"
+/path/to/roost/scripts/roost-notify done
 ```
 
-(Use the full path to `roost-notify` if `scripts/` isn't on your `PATH`.)
+## `roost-launch` — the CLI launcher
+
+Makes the `roost` command a pure launcher. It starts Roost in its own session
+(`setsid`) so it outlives the terminal, keeps the current directory (so
+`cd project && roost` still picks that project), and then closes the launching
+terminal.
+
+```sh
+ln -sfn /path/to/roost/scripts/roost-launch ~/.local/bin/roost
+```
+
+Output and startup errors go to `${XDG_STATE_HOME:-~/.local/state}/roost.log`.
+If the binary is missing, the wrapper fails before closing the terminal, so a
+broken launch is never hidden. To launch without closing the terminal, run the
+binary directly: `vendor/ghostty/zig-out/bin/roost`.
+
+## `roost.desktop` — the desktop launcher
+
+Copy it to `~/.local/share/applications/` after pointing `Exec=` at your clone.
+It runs the binary directly, not `roost-launch`. The installed copy doesn't
+update itself, so copy it again when the repo's version changes.
+
+## `install-icon.sh` — the app icon
+
+Installs the Roost icon (`dev.scottzirkel.Roost`) into your hicolor icon theme,
+so the launcher, taskbar, Alt-Tab and notifications show it. It renders
+`src/roost/icons/scalable/apps/dev.scottzirkel.Roost.svg`, the square version of
+the logo, to PNGs at the standard sizes, under
+`${XDG_DATA_HOME:-~/.local/share}/icons/hicolor`.
+
+```sh
+/path/to/roost/scripts/install-icon.sh
+```
+
+Safe to re-run after editing the SVG. Needs `rsvg-convert` (librsvg).
+
+## `check-core.sh` — the core purity check
+
+Fails if anything in `src/roost/core/` imports GTK, libadwaita, GLib or
+Ghostty. `build.sh` runs it on every build. See
+[the portable core](../docs/architecture.md#the-portable-core).
+
+## `patch-zig-linker.sh` — Arch linker workaround
+
+Patches your local Zig 0.15.2 to link with LLVM and LLD, working around Zig
+issue #31272 on Arch. Safe to re-run; re-run it after reinstalling Zig. See
+[Toolchain](../docs/development.md#toolchain).

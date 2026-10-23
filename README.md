@@ -65,6 +65,9 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Many agents at once** — every Agent pane tracks its own state, and the
   window title rolls up whichever one most wants you (`🔔` > `✓` > `●`), so a
   Roost window that needs you says so from the taskbar.
+- **Wired actions** — define commands like "run the tests" per project, run them
+  from the header menu or `Ctrl+Shift+P`, and route the output by result:
+  failures to the Agent pane, a passing run to a notification.
 - **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
   `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
   Agent pane's output back into the Scratchpad. The Scratchpad renders Markdown
@@ -127,10 +130,9 @@ ROOST_PROJECT=~/code/my-project roost
 ```
 
 The project directory is resolved from `$ROOST_PROJECT`, else the current
-directory — every pane (including lazygit) launches there. Launched from the
-**desktop entry**, Roost is single-instance: a second launch forwards to the
-project chooser instead of opening a stray window. From a **terminal** it's
-always its own independent window.
+directory — every pane (including lazygit) launches there. Every window is its
+own process, so one can't take down another. The **desktop entry** opens your
+last project, or the project chooser if Roost is already running.
 
 ### Keybindings
 
@@ -145,9 +147,12 @@ always its own independent window.
 | `Ctrl+Shift+←/→/↑/↓` | Resize the focused pane |
 | `Ctrl+Shift+Alt+←/→/↑/↓` | Swap the focused pane with its neighbor |
 | `Ctrl+Shift+R` / `D` | Split the focused pane right / down |
+| `Ctrl+Shift+Alt+R` / `D` | Split the focused pane's whole column / row |
 | `Ctrl+Shift+A` / `S` / `G` / `E` / `N` | Add an Agent / Shell / Git / Editor / Scratchpad pane |
 | `Ctrl+W` | Close the focused pane |
 | `Ctrl+Alt+R` | Reset to the default 2×2 layout |
+| `Ctrl+Shift+P` | Run a wired action |
+| `Ctrl+Shift+M` | Toggle focus-follows-mouse |
 | `Ctrl+,` | Open Settings |
 | `Ctrl+Shift+/` | Show the keyboard cheat-sheet |
 | `Ctrl+Shift+Q` | Reload — restart into the latest build |
@@ -158,8 +163,8 @@ always its own independent window.
 
 ### Agent notifications
 
-The Agent pane exports `ROOST_SOCK` into every pane, plus a per-pane `ROOST_PANE`
-so each event updates the badge of the pane it came from. Wiring
+Roost exports `ROOST_SOCK` into every pane, plus a per-pane `ROOST_PANE` so
+each event updates the badge of the pane it came from. Wiring
 `scripts/roost-notify` into Claude Code's hooks lets the agent ping Roost:
 
 ```jsonc
@@ -180,12 +185,27 @@ Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can
 never break your agent.
 
-Hooks are optional. Without them, Roost falls back to reading the Agent pane's
-visible screen every 600ms and classifying it (`src/roost/core/agent_detect.zig`).
-A pane that *has* reported through a hook stops being scraped for the rest of
-its life — an agent that tells you what it's doing is never second-guessed by a
-reading of its footer. Only the desktop notification needs hooks; the badge and
-the window-title rollup work either way.
+Hooks are optional. Without them, Roost reads the Agent pane's screen and title
+to work out its state, so the badge and the window title still work. Only the
+desktop notification needs hooks.
+
+### Wired actions
+
+Define actions in `~/.config/roost/actions.json`, or per project in
+`<project>/.roost/actions.json` (project entries replace global ones with the
+same label):
+
+```json
+{ "actions": [
+  { "label": "Run tests", "command": "composer test",
+    "on_success": "notify", "on_failure": "agent" }
+] }
+```
+
+A route is `agent`, `shell`, `scratchpad`, `notify` or `none`. `route` sets the
+default, and `on_success` / `on_failure` override it by exit code. Actions run
+in the background with live output and a Stop button, so a long test suite
+never blocks the window.
 
 ## Configuration
 
@@ -194,6 +214,7 @@ the window-title rollup work either way.
 - **Roost options** (agent command, focus-follows-mouse, scratchpad, etc.) live
   in `~/.config/roost/config` and are editable in the **Settings** dialog
   (`Ctrl+,`).
+- **Wired actions** live in `actions.json` files; see [Wired actions](#wired-actions).
 - **Layouts & recents** live in `~/.config/roost/` (one layout file per project,
   keyed by path).
 - **App id** is `dev.scottzirkel.Roost` (set so Roost never collides with a real
@@ -201,70 +222,36 @@ the window-title rollup work either way.
 
 ## How it works
 
-Roost's code relative-imports Ghostty internals, so it has to live *inside* the
-Ghostty source tree to compile — but it never edits Ghostty's own files. So the
-build is a clean overlay. `./build.sh`:
-
-1. checks out the pinned Ghostty submodule (vanilla upstream, `v1.3.1`),
-2. symlinks `src/roost/` + `src/main_roost.zig` into `vendor/ghostty/src/`,
-3. applies `patches/build.zig.patch` — the one additive change, which registers
-   the `roost` executable, and
-4. runs `zig build roost`, linking the system's font and image libraries
-   (`-fsys=fontconfig` and friends) so Roost never carries a second copy of a
-   library GTK already loads.
-
-The diff against upstream Ghostty is *only* our own files plus that one build
-step.
+Roost's code imports Ghostty internals, so it compiles inside Ghostty's source
+tree, but it never edits Ghostty's files. `./build.sh` symlinks Roost's source
+into a pinned, vanilla Ghostty submodule, adds one build step, and builds. The
+diff against upstream Ghostty is only that one build step.
 
 ```
 src/roost/            the workspace: panes, tree, layout, git, IPC, scratchpad
-src/roost/core/       portable logic: std-only, no GTK (see below)
+src/roost/core/       portable logic: std-only, no GTK (groundwork for macOS)
 src/main_roost.zig    thin entry point
-patches/              additive build.zig step
-scripts/              roost-notify (agent hooks), roost.desktop, toolchain patch
+patches/              the one additive build.zig step
+scripts/              roost-notify (agent hooks), launcher, icon, toolchain patch
 vendor/ghostty/       Ghostty submodule (pinned, vanilla upstream)
 build.sh              overlay + build
 ```
 
-### The portable core
+More in [docs/architecture.md](docs/architecture.md).
 
-`src/roost/core/` holds the parts of Roost that don't need a UI toolkit —
-today, agent-state detection. Everything in it is std-only Zig with no GTK and
-no Ghostty imports, enforced on every build by `scripts/check-core.sh` (the same
-kind of mechanical gate as the additive-Ghostty one, for the same reason: a rule
-nobody checks is a rule that rots).
+## Status
 
-The point is portability. GTK4 has no supported path on macOS — Ghostty itself
-builds its Mac app in Xcode against `libghostty` rather than GTK — so a native
-macOS Roost needs a second *shell*, but it should not need a second *brain*.
-Keeping the decision logic toolkit-free means it can be compiled into a static
-library behind a C ABI and driven from Swift exactly the way Ghostty drives
-libghostty. Anything that talks in plain data belongs in `core/`; anything that
-touches a widget stays in `src/roost/`.
-
-## Status & roadmap
-
-Roost is **early but usable** — the core is complete and in daily use:
-
-- ✅ Real Ghostty panes, free-form pane tree, per-project persisted layouts
-- ✅ Git worktree create + switch (and into a new window), project/worktree chooser, recents
-- ✅ Agent command + socket IPC → desktop notifications + status badge
-- ✅ Hook-free agent-state detection (screen + OSC title), N agent panes each
-  tracked independently, attention rolled up into the window title
-- ✅ Portable `core/` with an enforced no-toolkit gate (groundwork for macOS)
-- ✅ Scratchpad ↔ Agent (send selection, capture output) with live Markdown styling
-- ✅ Settings dialog, focus-follows-mouse (with dwell), keyboard cheat-sheet, app icon
-
-The original roadmap gaps are now closed: the Roost app **icon**, the Agent-pane
-**`Ctrl+Z`** remap (→ Claude Code's undo), live scratchpad **Markdown styling** and
-**capturing agent output** into it, and **"New Worktree…" opening in a new window**
-are all done. No known feature gaps remain — issues and ideas welcome.
+Roost is **early but usable**, and in daily use. What's next — a Waybar
+indicator, an API that lets the agent drive Roost, and a native macOS version —
+is in [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-Issues and PRs welcome. Keep the **additive gate** intact — Roost adds files and
-never edits Ghostty's source, so `git -C vendor/ghostty diff --name-only v1.3.1`
-should only ever show `build.zig`.
+Issues and PRs welcome. [docs/development.md](docs/development.md) covers
+building, testing and conventions. Keep the **additive gate** intact — Roost
+adds files and never edits Ghostty's source, so
+`git -C vendor/ghostty diff --name-only v1.3.1` should only ever show
+`build.zig`.
 
 ## License
 
