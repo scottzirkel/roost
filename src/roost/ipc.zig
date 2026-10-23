@@ -12,13 +12,13 @@
 //! which our run loop already pumps (`glib.MainContext.iteration`). So the
 //! `incoming` signal fires inline during the loop — NO extra thread.
 //!
-//! PROTOCOL (deliberately tiny): one connection delivers one short line. The
-//! first whitespace-delimited token is the EVENT; the rest is an optional
-//! human message:
+//! PROTOCOL (deliberately tiny): one connection delivers one short line, an
+//! EVENT plus an optional human message, optionally led by the sender's pane:
 //!     done            -> "Agent finished"      (notification + ✓ badge)
 //!     needs-input msg  -> "Agent needs you"     (notification + 🔔 badge)
 //!     working          -> (no notification)     (● working badge only)
-//! Unknown events are ignored.
+//!     pane=3 done     -> the same, for the pane whose ROOST_PANE is 3
+//! Unknown events are ignored. Parsing lives in `core/hook_msg.zig`.
 //!
 //! ADDITIVE: our own file. It names Ghostty's `Application` only to send a
 //! notification the exact way Ghostty itself does (see application.zig's
@@ -37,31 +37,18 @@ const layout = @import("layout.zig");
 const Workspace = layout.Workspace;
 const Config = @import("config.zig").Config;
 const Project = @import("project.zig").Project;
+const hook_msg = @import("core/hook_msg.zig");
 
 const log = std.log.scoped(.roost_ipc);
 
-/// Agent lifecycle state we surface in the badge + notifications.
-pub const AgentEvent = enum {
-    working,
-    needs_input,
-    done,
-
-    fn fromToken(tok: []const u8) ?AgentEvent {
-        if (std.mem.eql(u8, tok, "working")) return .working;
-        if (std.mem.eql(u8, tok, "needs-input")) return .needs_input;
-        if (std.mem.eql(u8, tok, "done")) return .done;
-        return null;
-    }
-
-    /// Map to the tree/workspace badge status.
-    fn status(self: AgentEvent) layout.AgentStatus {
-        return switch (self) {
-            .working => .working,
-            .needs_input => .needs_input,
-            .done => .done,
-        };
-    }
-};
+/// Map a hook event to the tree/workspace badge status.
+fn statusOf(event: hook_msg.Event) layout.AgentStatus {
+    return switch (event) {
+        .working => .working,
+        .needs_input => .needs_input,
+        .done => .done,
+    };
+}
 
 /// Everything an incoming message needs to act on the live UI. Lives in
 /// `run`'s stack frame (like AppContext) so the pointer we hand the GLib signal
@@ -226,29 +213,25 @@ pub const Server = struct {
 
     /// Parse + act on one message line. Public for direct unit-style exercise.
     pub fn handle(self: *Server, line: []const u8) void {
-        if (line.len == 0) return;
-
-        // Split into "<event> <rest...>".
-        const sp = std.mem.indexOfScalar(u8, line, ' ');
-        const tok = if (sp) |i| line[0..i] else line;
-        const rest = if (sp) |i| std.mem.trim(u8, line[i + 1 ..], " \t") else "";
-
-        const event = AgentEvent.fromToken(tok) orelse {
-            log.debug("ignoring unknown ipc event '{s}'", .{tok});
+        const msg = hook_msg.parse(line) orelse {
+            if (line.len > 0) log.debug("ignoring unrecognized ipc message ({d} bytes)", .{line.len});
             return;
         };
+        const rest = msg.text;
 
-        log.info("agent event: {s}{s}{s}", .{
-            @tagName(event),
+        log.info("agent event: {s} pane={?d}{s}{s}", .{
+            @tagName(msg.event),
+            msg.pane,
             if (rest.len > 0) " — " else "",
             rest,
         });
 
-        // Update the Agent-pane badge for every known event.
-        self.workspace.setAgentStatus(event.status());
+        // Update the sender's Agent-pane badge for every known event.
+        self.workspace.setAgentStatus(msg.pane, statusOf(msg.event));
 
-        // Notify (+ optional sound) for the attention-worthy events only.
-        switch (event) {
+        // Notify (+ optional sound) for the attention-worthy events only. An
+        // agent in a Shell pane gets no badge, but still gets its popup.
+        switch (msg.event) {
             .working => {},
             .needs_input => {
                 self.notify("Agent needs you", if (rest.len > 0) rest else "Your agent is waiting for input.");

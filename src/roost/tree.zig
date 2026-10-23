@@ -34,6 +34,11 @@ const detect = @import("core/agent_detect.zig");
 
 const log = std.log.scoped(.roost_tree);
 
+/// Source of `Leaf.id`. Process-wide rather than per-tree: the id goes out to the
+/// pane's processes as `ROOST_PANE` and comes back over this process's one
+/// `ROOST_SOCK`, so it must never repeat within the process. Main thread only.
+var next_pane_id: u32 = 1;
+
 /// Focus-follows-mouse: when on, the pointer entering a pane focuses it (mini-
 /// Hyprland feel). App-wide mode (not per-tree), so a module global; toggled at
 /// runtime. Default on. Read by every leaf's motion controller (`onLeafEnter`).
@@ -201,6 +206,10 @@ pub const ScratchCfg = struct {
 pub const Leaf = struct {
     role: Role,
     pane: Pane,
+    /// This pane's `ROOST_PANE`, exported into its terminal so an agent's hooks
+    /// can say which pane they came from (see `setAgentStatus`). Unique within
+    /// the process; also set on the scratchpad, which simply never uses it.
+    id: u32,
     /// Agent-state tracking for an Agent-role leaf. Per-leaf (not per-tree) so
     /// several agents can run side by side, each with its own badge — the state
     /// of one agent says nothing about the others. Left at its default for
@@ -425,7 +434,9 @@ pub const Tree = struct {
         const node = try self.alloc.create(Node);
         errdefer self.alloc.destroy(node);
 
-        var pane = self.spawnPane(role);
+        const id = next_pane_id;
+        next_pane_id +%= 1;
+        var pane = self.spawnPane(role, id);
         // Wire the close-request no-op on terminal panes if we have a handler.
         if (pane == .terminal) {
             if (self.close_cb) |cb| {
@@ -437,6 +448,7 @@ pub const Tree = struct {
         node.* = .{ .leaf = .{
             .role = role,
             .pane = pane,
+            .id = id,
             .box = lb.box,
             .label = lb.label,
             // Pick the detection ruleset from the command this pane actually
@@ -457,8 +469,9 @@ pub const Tree = struct {
         return node;
     }
 
-    /// Construct the pane content for a role.
-    fn spawnPane(self: *Tree, role: Role) Pane {
+    /// Construct the pane content for a role. `id` becomes the terminal's
+    /// `ROOST_PANE`.
+    fn spawnPane(self: *Tree, role: Role, id: u32) Pane {
         return switch (role) {
             // Agent runs the resolved agent command (e.g. `claude`) if we have
             // one; otherwise it falls back to the user's default shell (null).
@@ -466,22 +479,26 @@ pub const Tree = struct {
                 .command = if (self.agent_cmd) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
+                .pane_id = id,
             }) },
             // Shell always runs the user's default shell.
             .shell => .{ .terminal = TerminalPane.initGhostty(.{
                 .title = role.title(),
                 .cwd = self.cwd,
+                .pane_id = id,
             }) },
             .git => .{ .terminal = TerminalPane.initGhostty(.{
                 .command = if (self.git_cmd) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
+                .pane_id = id,
             }) },
             .editor => .{ .terminal = TerminalPane.initGhostty(.{
                 // $EDITOR via shell expansion, falling back to nvim then vi.
                 .command = .{ .shell = "${EDITOR:-${VISUAL:-nvim}} || vi" },
                 .cwd = self.cwd,
                 .title = role.title(),
+                .pane_id = id,
             }) },
             .scratchpad => .{ .scratchpad = ScratchpadPane.init(self.alloc, self.scratch_path, self.scratch_autosave) },
         };
@@ -887,20 +904,28 @@ pub const Tree = struct {
 
     // --- Agent status badge ----------------------------------------------
 
-    /// Update the FIRST agent-role leaf's header label to reflect `status`.
-    /// No-op if there is no agent pane. Used by the IPC server when the agent
-    /// reports progress (done / needs-input / working).
+    /// Update an agent pane's header label to reflect `status`. Used by the
+    /// IPC server when an agent's hook reports progress (done / needs-input /
+    /// working).
+    ///
+    /// `pane` is the sender's `ROOST_PANE`. It picks the badge to update, so
+    /// two agents in one window can't overwrite each other's state (a second
+    /// agent's `working` used to wipe the first one's 🔔). No badge changes
+    /// when that pane is gone, or isn't an Agent pane (an agent run in a Shell
+    /// pane): those panes have no badge, and guessing would just repaint some
+    /// other agent's. Null — a pane spawned by an older Roost build — falls
+    /// back to the first Agent pane, as before.
     ///
     /// The event is recorded on that leaf's tracker, not just painted on the
     /// label: `report` marks the pane as hook-driven, which permanently stops
     /// screen scraping from second-guessing it. An agent that tells us what
     /// it's doing always outranks us reading its footer.
-    ///
-    /// NOTE: hook events still address the *first* agent pane, because the
-    /// `ROOST_SOCK` protocol has no pane identity yet. Additional agent panes
-    /// are driven by detection until it does.
-    pub fn setAgentStatus(self: *Tree, status: AgentStatus) void {
-        const node = self.firstLeafOfRole(.agent) orelse return;
+    pub fn setAgentStatus(self: *Tree, pane: ?u32, status: AgentStatus) void {
+        const node = if (pane) |id|
+            self.leafById(id) orelse return
+        else
+            self.firstLeafOfRole(.agent) orelse return;
+        if (node.leaf.role != .agent) return;
         node.leaf.agent.report(status.toDetect());
         node.leaf.label.setText(status.badge());
     }
@@ -981,6 +1006,13 @@ pub const Tree = struct {
     fn firstLeafOfRole(self: *Tree, role: Role) ?*Node {
         var found: ?*Node = null;
         leafOfRoleWalk(self.root, role, &found);
+        return found;
+    }
+
+    /// The leaf whose `id` is `id`, or null when no pane in this tree has it.
+    fn leafById(self: *Tree, id: u32) ?*Node {
+        var found: ?*Node = null;
+        leafByIdWalk(self.root, id, &found);
         return found;
     }
 
@@ -1467,6 +1499,19 @@ fn leafOfRoleWalk(node: *Node, want: Role, out: *?*Node) void {
         .split => |*s| {
             leafOfRoleWalk(s.start, want, out);
             leafOfRoleWalk(s.end, want, out);
+        },
+    }
+}
+
+fn leafByIdWalk(node: *Node, id: u32, out: *?*Node) void {
+    if (out.* != null) return;
+    switch (node.*) {
+        .leaf => |*l| {
+            if (l.id == id) out.* = node;
+        },
+        .split => |*s| {
+            leafByIdWalk(s.start, id, out);
+            leafByIdWalk(s.end, id, out);
         },
     }
 }

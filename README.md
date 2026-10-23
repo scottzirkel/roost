@@ -158,8 +158,9 @@ always its own independent window.
 
 ### Agent notifications
 
-The Agent pane exports `ROOST_SOCK` into every pane. Wiring `scripts/roost-notify`
-into Claude Code's hooks lets the agent ping Roost:
+The Agent pane exports `ROOST_SOCK` into every pane, plus a per-pane `ROOST_PANE`
+so each event updates the badge of the pane it came from. Wiring
+`scripts/roost-notify` into Claude Code's hooks lets the agent ping Roost:
 
 ```jsonc
 // ~/.claude/settings.json  (see scripts/claude-hooks.json for the full snippet)

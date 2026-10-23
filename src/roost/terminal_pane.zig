@@ -16,6 +16,7 @@ const std = @import("std");
 const configpkg = @import("../config.zig");
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const Application = @import("../apprt/gtk/class/application.zig").Application;
+const Config = @import("../apprt/gtk/class/config.zig").Config;
 const CoreSurface = @import("../Surface.zig");
 const apprt = @import("../apprt.zig");
 const terminal = @import("../terminal/main.zig");
@@ -32,9 +33,9 @@ pub const StartOptions = struct {
     command: ?configpkg.Command = null,
     /// Working directory to launch in. `null` inherits the default.
     cwd: ?[:0]const u8 = null,
-    /// Reserved for a future env-override pass. Ghostty's Surface currently
-    /// derives env from the app/config, so this is accepted but unused.
-    env: ?*const std.process.EnvMap = null,
+    /// Exported into the pane's process as `ROOST_PANE`, so an agent's hooks can
+    /// tell the window which pane they came from. `null` exports nothing.
+    pane_id: ?u32 = null,
     /// Title hint for the underlying surface.
     title: ?[:0]const u8 = null,
 };
@@ -195,6 +196,7 @@ pub const TerminalPane = union(enum) {
 /// `Surface` / `CoreSurface`.
 pub const GhosttyTerminalPane = struct {
     surface: *Surface,
+    pane_id: ?u32,
 
     fn create(opts: StartOptions) GhosttyTerminalPane {
         const surface = Surface.new(.{
@@ -202,7 +204,39 @@ pub const GhosttyTerminalPane = struct {
             .working_directory = opts.cwd,
             .title = opts.title,
         });
-        return .{ .surface = surface };
+        var self: GhosttyTerminalPane = .{ .surface = surface, .pane_id = opts.pane_id };
+        // Before the surface realizes: the child spawns then, with this env.
+        self.applyConfig();
+        return self;
+    }
+
+    /// Give the surface the application's current config, plus `ROOST_PANE`
+    /// when this pane has an id.
+    ///
+    /// `Surface.new` has no env override, and patching one into Ghostty would
+    /// break the zero-diff gate. But a surface spawns its child with its OWN
+    /// config's `env` entries, and that config is ours to set. So each pane gets
+    /// a private copy of the app config carrying its id. On any failure the pane
+    /// keeps the plain app config: it still works, its hooks just report
+    /// without a pane, and IPC falls back to the first Agent pane.
+    fn applyConfig(self: *GhosttyTerminalPane) void {
+        const app = Application.default();
+        const base = app.getConfig();
+        defer base.unref();
+        const id = self.pane_id orelse return self.surface.setConfig(base);
+
+        const own = Config.new(app.allocator(), base.get()) catch return self.surface.setConfig(base);
+        defer own.unref();
+        const cfg = own.getMut();
+        const arena = cfg.arenaAlloc();
+        var buf: [16]u8 = undefined;
+        const value = std.fmt.bufPrintZ(&buf, "{d}", .{id}) catch unreachable; // u32 fits
+        cfg.env.map.put(
+            arena,
+            arena.dupeZ(u8, "ROOST_PANE") catch return self.surface.setConfig(base),
+            arena.dupeZ(u8, value) catch return self.surface.setConfig(base),
+        ) catch return self.surface.setConfig(base);
+        self.surface.setConfig(own);
     }
 
     fn start(self: *GhosttyTerminalPane, _: StartOptions) void {
@@ -318,10 +352,9 @@ pub const GhosttyTerminalPane = struct {
     fn setTheme(self: *GhosttyTerminalPane) void {
         // Best-effort: re-apply the application's current config to the
         // surface, which causes it to re-pull theme/colors. We don't have a
-        // dedicated per-pane theme API in Phase 2.
-        const config = Application.default().getConfig();
-        defer config.unref();
-        self.surface.setConfig(config);
+        // dedicated per-pane theme API in Phase 2. `applyConfig` keeps the
+        // pane's ROOST_PANE in it, in case the surface hasn't spawned yet.
+        self.applyConfig();
     }
 
     fn destroy(self: *GhosttyTerminalPane) void {

@@ -11,6 +11,10 @@ remainder is an optional human-readable message:
 
 Recognized events (anything else is ignored by roost): done | needs-input | working
 
+When $ROOST_PANE is set (Roost exports it into each pane), the line is led by
+"pane=<id> ", so the window updates the badge of the pane the agent actually
+runs in. Without it, every agent in a window reports to the first Agent pane.
+
 This is meant to be wired into Claude Code hooks. Claude Code passes the hook
 payload as JSON on stdin; we read and ignore it (we only care about argv), but
 if NO message argument was given we try to lift a useful one out of that JSON
@@ -53,6 +57,10 @@ def main() -> int:
             message = ""
 
     line = event if not message else f"{event} {message}"
+    # Only a plain number: anything else would make roost drop the whole line.
+    pane = os.environ.get("ROOST_PANE", "")
+    if pane.isascii() and pane.isdigit():
+        line = f"pane={pane} {line}"
     # Keep it to one line; the receiver reads a single short message.
     line = line.replace("\n", " ").replace("\r", " ")
 

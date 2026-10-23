@@ -207,10 +207,11 @@ pub const Workspace = struct {
         self.t.sendFocusedScratchpadToAgent();
     }
 
-    /// Update the Agent pane's header badge to reflect `status`. No-op if there
-    /// is no agent pane. Driven by the IPC server on agent events.
-    pub fn setAgentStatus(self: *Workspace, status: AgentStatus) void {
-        self.t.setAgentStatus(status);
+    /// Update an Agent pane's header badge to reflect `status`: the pane whose
+    /// `ROOST_PANE` is `pane`, or the first Agent pane when that's null. Driven
+    /// by the IPC server on agent events; see `Tree.setAgentStatus`.
+    pub fn setAgentStatus(self: *Workspace, pane: ?u32, status: AgentStatus) void {
+        self.t.setAgentStatus(pane, status);
     }
 
     /// Poll every live agent pane's screen and refresh its badge. Driven by a

@@ -46,12 +46,16 @@ you.
 
 1. When Roost starts it opens a Unix-domain socket and exports its path as the
    environment variable **`ROOST_SOCK`**. Every pane Roost spawns — including
-   the Agent pane that runs `claude` — inherits this variable.
+   the Agent pane that runs `claude` — inherits this variable. Each pane also
+   gets its own **`ROOST_PANE`**, a number that names that pane.
 2. `roost-notify` connects to `$ROOST_SOCK` and writes one short line:
-   `<event> [message]`, where `<event>` is one of `done`, `needs-input`,
-   `working`.
+   `[pane=<id>] <event> [message]`, where `<event>` is one of `done`,
+   `needs-input`, `working`, and `<id>` is `$ROOST_PANE`.
 3. Roost reacts: it shows a native notification (for `done` / `needs-input`)
-   and updates the Agent pane's header badge.
+   and updates the header badge of the Agent pane the agent runs in. With two
+   agents in one window, each one's events update only its own badge. A line
+   without `pane=` (from a pane an older Roost build started) goes to the first
+   Agent pane.
 
 If `ROOST_SOCK` is unset or the socket is gone, `roost-notify` does nothing
 and exits 0 — it can never break your agent.
