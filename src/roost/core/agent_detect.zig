@@ -82,8 +82,9 @@ pub const Match = union(enum) {
     /// Every needle appears on one single line. Precise enough to pin down a
     /// menu row like `❯ 1. Yes` without false-firing on prose.
     same_line_all: []const []const u8,
-    /// Some line of the region begins with a Braille-pattern codepoint
-    /// (U+2800–U+28FF) — the near-universal spinner glyph for TUI agents.
+    /// Some line of the region begins with a spinner frame: a Braille-pattern
+    /// codepoint (U+2800–U+28FF), the near-universal spinner glyph for TUI
+    /// agents, or a half-filled circle ◐◑◒◓ (U+25D0–U+25D3), Claude Code's.
     spinner,
 };
 
@@ -228,17 +229,20 @@ fn lineHas(line: []const u8, needle: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(line, needle) != null;
 }
 
-/// Whether `line` starts with a Braille-pattern codepoint (U+2800–U+28FF).
+/// Whether `line` starts with a spinner frame: a Braille-pattern codepoint
+/// (U+2800–U+28FF), or a half-filled circle ◐◑◒◓ (U+25D0–U+25D3).
 ///
-/// UTF-8 encodes that block as `E2 A0..A3 80..BF`, so this is a 3-byte check
-/// with no decoder. Spinners are the single most reliable "this agent is
-/// thinking" signal across CLIs, and they're always the first glyph on the
-/// line (or in the title).
+/// UTF-8 encodes those as `E2 A0..A3 80..BF` and `E2 97 90..93`, so this is a
+/// 3-byte check with no decoder. Spinners are the single most reliable "this
+/// agent is thinking" signal across CLIs, and they're always the first glyph on
+/// the line (or in the title). The circles are there because Claude Code moved
+/// its title spinner off Braille: 2.1.308 alternates "◐ <task>" / "◑ <task>".
 fn startsWithSpinner(line: []const u8) bool {
-    if (line.len < 3) return false;
-    return line[0] == 0xE2 and
-        line[1] >= 0xA0 and line[1] <= 0xA3 and
+    if (line.len < 3 or line[0] != 0xE2) return false;
+    const braille = line[1] >= 0xA0 and line[1] <= 0xA3 and
         line[2] >= 0x80 and line[2] <= 0xBF;
+    const half_circle = line[1] == 0x97 and line[2] >= 0x90 and line[2] <= 0x93;
+    return braille or half_circle;
 }
 
 fn matches(m: Match, lines: []const []const u8) bool {
@@ -382,10 +386,12 @@ pub const Tracker = struct {
 //  1. **The OSC title is the best signal, and the footer is the worst.** Claude
 //     Code 2.x does not print "esc to interrupt" while working at all — the
 //     footer reads "✽ Whirlpooling… (8s · ↓ 6 tokens)". What reliably changes
-//     is the title: a Braille spinner while working, "✳ " at rest.
-//  2. **Spinner glyphs are not universally Braille.** claude and codex animate
-//     Braille into the *title*, but claude's footer spinner is ✢/✶/✻/✽ and
-//     opencode's is ⬝. A Braille-only footer rule silently never fires.
+//     is the title: a spinner while working, "✳ " at rest.
+//  2. **Spinner glyphs are not universally Braille, and they change.** codex
+//     animates Braille into the *title*; claude did too until 2.1.x moved it
+//     to ◐/◑ (found 2026-10-23, after detection had silently gone blind).
+//     claude's footer spinner is ✢/✶/✻/✽ and opencode's is ⬝. A Braille-only
+//     rule silently never fires, so re-probe when an agent updates.
 //  3. **A blocked agent can still look idle in its title.** Claude's plan
 //     approval menu appears while the title still reads "✳ ". This is exactly
 //     what the priority ordering is for: screen-based blocked rules must
@@ -435,9 +441,11 @@ pub const claude: Manifest = .{
             .lines = 12,
             .match = .{ .any = &.{ "would you like to proceed", "do you want to proceed" } },
         },
-        // VERIFIED: the title animates Braille while a turn is running
-        // ("⠂ Calculate basic arithmetic expression"). This is the single most
-        // reliable claude signal.
+        // VERIFIED: the title animates a spinner while a turn is running. It
+        // was Braille on 2.x in July ("⠂ Calculate basic arithmetic
+        // expression"); 2.1.308 (2026-10-23) alternates "◐ Counting from 1 to
+        // 15" / "◑ …". `.spinner` covers both. This is the single most reliable
+        // claude signal.
         .{
             .id = "working_title_spinner",
             .state = .working,
@@ -658,7 +666,7 @@ pub const generic: Manifest = .{
             .lines = 12,
             .match = .{ .same_line_all = &.{ "1.", "yes" } },
         },
-        // Both claude and codex animate Braille into the title while working.
+        // Both claude and codex animate a spinner into the title while working.
         .{
             .id = "working_title_spinner",
             .state = .working,
@@ -763,6 +771,18 @@ test "spinner detection covers the braille block" {
     try std.testing.expect(!startsWithSpinner("\u{2500} rule"));
     try std.testing.expect(!startsWithSpinner(""));
     try std.testing.expect(!startsWithSpinner("ab"));
+}
+
+test "spinner detection covers the half-filled circles and nothing beside them" {
+    try std.testing.expect(startsWithSpinner("◐ Counting from 1 to 15"));
+    try std.testing.expect(startsWithSpinner("◑ Counting from 1 to 15"));
+    try std.testing.expect(startsWithSpinner("\u{25D2}"));
+    try std.testing.expect(startsWithSpinner("\u{25D3}"));
+    // Neighbours: ● (Roost's own working badge) and ◔ must not count.
+    try std.testing.expect(!startsWithSpinner("\u{25CF} working"));
+    try std.testing.expect(!startsWithSpinner("\u{25D4} quarter"));
+    // The idle glyph must never read as a spinner.
+    try std.testing.expect(!startsWithSpinner("✳ Claude Code"));
 }
 
 test "claude: interrupt hint reads as working" {
@@ -977,6 +997,28 @@ test "captured claude 2.x: working has no interrupt hint, only a title spinner" 
     const v = classify(&claude, .{ .screen = screen, .title = "⠐ Calculate basic arithmetic expression" });
     try std.testing.expectEqual(State.working, v.state);
     try std.testing.expectEqualStrings("working_title_spinner", v.rule.?);
+}
+
+test "captured claude 2.1.308: half-circle title spinner reads as working" {
+    // Titles exactly as a real run emitted them on 2026-10-23; the screen is
+    // rebuilt from fragments of that run's output (the verb, the token count,
+    // the status line). It's ambiguous on its own — the composer chrome is
+    // present — so the title decides.
+    const screen =
+        \\✽ Contemplating… (3s · ↓ 9 tokens)
+        \\────────────────────────────────────────────
+        \\❯
+        \\────────────────────────────────────────────
+        \\  …/projects/roost 6d791cd  Haiku 5.5
+        \\  ⏵⏵ auto mode on (shift+tab to cycle)
+    ;
+    for ([_][]const u8{ "◐ Counting from 1 to 15", "◑ Counting from 1 to 15" }) |title| {
+        const v = classify(&claude, .{ .screen = screen, .title = title });
+        try std.testing.expectEqual(State.working, v.state);
+        try std.testing.expectEqualStrings("working_title_spinner", v.rule.?);
+    }
+    const rest = classify(&claude, .{ .screen = screen, .title = "✳ Counting from 1 to 15" });
+    try std.testing.expectEqual(State.idle, rest.state);
 }
 
 test "captured claude 2.x: plan approval blocks even though the title reads idle" {

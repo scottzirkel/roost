@@ -944,6 +944,11 @@ pub const Tree = struct {
             .title = term.title() orelse "",
         });
         if (!changed) return;
+        log.debug("agent pane ({s}): {s} via rule {s}", .{
+            leaf.manifest.id,
+            @tagName(leaf.agent.state),
+            leaf.agent.rule orelse "(edge)",
+        });
         if (AgentStatus.fromDetect(leaf.agent.state)) |status| {
             leaf.label.setText(status.badge());
         }
