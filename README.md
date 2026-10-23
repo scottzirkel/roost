@@ -165,7 +165,12 @@ last project, or the project chooser if Roost is already running.
 
 Roost exports `ROOST_SOCK` into every pane, plus a per-pane `ROOST_PANE` so
 each event updates the badge of the pane it came from. Wiring
-`scripts/roost-notify` into Claude Code's hooks lets the agent ping Roost:
+`scripts/roost-notify` into Claude Code's hooks lets the agent ping Roost.
+
+The easy way is **Settings → Claude Code hooks** (`Ctrl+,`). It shows whether
+each hook is installed and whether it has run in this window. **Add Missing
+Hooks…** adds any that are missing to `~/.claude/settings.json`, after asking,
+and keeps a backup of the old file. By hand, the hooks look like this:
 
 ```jsonc
 // ~/.claude/settings.json  (see scripts/claude-hooks.json for the full snippet)
@@ -184,6 +189,9 @@ the next run.
 Full setup is in [`scripts/README.md`](scripts/README.md). If `ROOST_SOCK` is
 unset (not running under Roost), the helper does nothing and exits 0 — it can
 never break your agent.
+
+If installed hooks stop reaching Roost, for example after a Claude Code update,
+Roost says so once with a notification instead of quietly falling back.
 
 Hooks are optional. Without them, Roost reads the Agent pane's screen and title
 to work out its state, so the badge and the window title still work. Only the

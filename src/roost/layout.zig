@@ -216,8 +216,8 @@ pub const Workspace = struct {
 
     /// Poll every live agent pane's screen and refresh its badge. Driven by a
     /// timer in app.zig; see `Tree.pollAgents`.
-    pub fn pollAgents(self: *Workspace) void {
-        self.t.pollAgents();
+    pub fn pollAgents(self: *Workspace) bool {
+        return self.t.pollAgents();
     }
 
     /// The most attention-worthy state across all agent panes, for the window-

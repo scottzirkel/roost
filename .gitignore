@@ -5,6 +5,8 @@ zig-out/
 
 # Generated: bundled icons compiled by build.sh and @embedFile'd into the binary
 src/roost/icons.gresource
+# Generated: where this clone lives, written by build.sh
+src/roost/build_info.zig
 
 # Editor / OS cruft
 .DS_Store

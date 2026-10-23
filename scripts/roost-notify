@@ -15,6 +15,11 @@ When $ROOST_PANE is set (Roost exports it into each pane), the line is led by
 "pane=<id> ", so the window updates the badge of the pane the agent actually
 runs in. Without it, every agent in a window reports to the first Agent pane.
 
+When $ROOST_PROTOCOL is 2 or more, the line also names the Claude Code hook
+that ran ("hook=Stop "), taken from the payload's hook_event_name, so Roost can
+tell which hooks actually run. An older Roost doesn't set it, and would drop a
+line carrying a field it doesn't know.
+
 This is meant to be wired into Claude Code hooks. Claude Code passes the hook
 payload as JSON on stdin; we read and ignore it (we only care about argv), but
 if NO message argument was given we try to lift a useful one out of that JSON
@@ -28,6 +33,14 @@ import json
 import os
 import socket
 import sys
+
+
+def protocol() -> int:
+    """The newest message format the receiving Roost parses."""
+    try:
+        return int(os.environ.get("ROOST_PROTOCOL", "1"))
+    except ValueError:
+        return 1
 
 
 def main() -> int:
@@ -48,15 +61,22 @@ def main() -> int:
     except Exception:
         stdin_data = ""
 
-    if not message and stdin_data:
+    payload = {}
+    if stdin_data:
         try:
-            payload = json.loads(stdin_data)
-            if isinstance(payload, dict):
-                message = str(payload.get("message", "")).strip()
+            parsed = json.loads(stdin_data)
+            if isinstance(parsed, dict):
+                payload = parsed
         except Exception:
-            message = ""
+            payload = {}
+    if not message:
+        message = str(payload.get("message", "")).strip()
 
     line = event if not message else f"{event} {message}"
+    # One plain word, or Roost would drop the whole line.
+    hook = str(payload.get("hook_event_name", ""))
+    if hook.isascii() and hook.isalnum() and protocol() >= 2:
+        line = f"hook={hook} {line}"
     # Only a plain number: anything else would make roost drop the whole line.
     pane = os.environ.get("ROOST_PANE", "")
     if pane.isascii() and pane.isdigit():

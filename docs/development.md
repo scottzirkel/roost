@@ -28,8 +28,9 @@ How to build, test and debug Roost. For how it's designed, see
 2. runs `scripts/check-core.sh`,
 3. symlinks `src/roost/` and `src/main_roost.zig` into `vendor/ghostty/src/`,
 4. resets and re-applies `patches/build.zig.patch`,
-5. compiles the bundled icons into a GResource, and
-6. runs `zig build roost` with the system font and image libraries.
+5. compiles the bundled icons into a GResource,
+6. writes `src/roost/build_info.zig` with the clone's path, and
+7. runs `zig build roost` with the system font and image libraries.
 
 Edit source in the parent repo's `src/roost/`; the submodule only holds
 symlinks. The submodule shows as dirty after a build, which is expected.
@@ -53,15 +54,16 @@ layout. Pane processes and scrollback start fresh.
 Run these before committing:
 
 ```sh
-zig test src/roost/core/agent_detect.zig
-zig test src/roost/core/hook_msg.zig
-zig test src/roost/actions.zig
-zig test src/roost/md.zig
-zig test src/roost/ansi.zig
-scripts/check-core.sh                            # core/ stays toolkit-free
+scripts/test.sh                                  # core check + every unit test
 git -C vendor/ghostty diff --name-only v1.3.1    # must print only build.zig
 ./build.sh -p /tmp/roost-test                    # it still compiles
 ```
+
+`scripts/test.sh` runs `check-core.sh`, then `zig test` on everything in
+`src/roost/core/` and the other std-only files. A GitHub Action
+(`.github/workflows/ci.yml`) runs the same script on every push, with stock
+Zig 0.15.2 on Ubuntu. Stock Zig builds debug tests with its own x86_64 backend,
+not LLVM; `zig test -fno-llvm -fno-lld <file>` reproduces that locally.
 
 Only the std-only files have unit tests. Everything that touches GTK is checked
 by building it and running it in an isolated instance.
@@ -104,9 +106,21 @@ A good isolated instance:
 Synthetic key presses (`hl.dsp.send_key_state`) didn't reach a parked window
 in testing. Drive behavior another way:
 - a fake agent on `ROOST_AGENT`, a script that prints terminal titles with
-  `\e]0;<title>\a` and calls `scripts/roost-notify`;
-- writing to the instance's socket directly;
+  `\e]0;<title>\a` and calls `scripts/roost-notify`. Name it `claude` to get
+  Claude's detection rules;
+- writing to the instance's socket directly
+  (`$XDG_RUNTIME_DIR/roost-<pid>.sock`);
+- the accessibility API, which works on a parked window. Python's
+  `gi.repository.Atspi` can walk the widget tree, read labels and click buttons
+  (GTK's role name is `button`). The registry normally starts through systemd,
+  which a private bus can't do, so start `/usr/lib/at-spi-bus-launcher
+  --launch-immediately` and then `/usr/lib/at-spi2-registryd` inside the
+  session before Roost;
 - reading its debug log from stderr.
+
+Unix socket paths are limited to 108 bytes, and scratch directories are often
+longer. Put test sockets in `$XDG_RUNTIME_DIR`, and don't name them
+`roost-*.sock`: Roost sweeps those at startup.
 
 ## Probing an agent CLI
 
@@ -116,6 +130,11 @@ fixed-size tmux pane, for example 120×32, and read back what Roost would see:
 real captures into "captured …" tests in `core/agent_detect.zig`. Re-probe
 whenever a tool updates; Claude Code 2.1.308 changed its spinner without
 notice.
+
+Nothing automatic catches that kind of change. CI replays saved screens, so
+it keeps passing after a tool's look changes, and the hook checks only watch
+hooks. After a Claude Code update, check that an un-hooked Agent pane's badge
+still changes, or re-probe.
 
 ## Debugging crashes
 

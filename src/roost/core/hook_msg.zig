@@ -6,7 +6,7 @@
 //! socket server (`ipc.zig`), which only moves bytes and acts on the result.
 //!
 //! FORMAT:
-//!     [pane=<id>] <event> [message...]
+//!     [pane=<id>] [hook=<Event>] <event> [message...]
 //! `event` is `working`, `needs-input` or `done`; anything else is ignored.
 //!
 //! The optional leading `pane=<id>` says WHICH pane the agent runs in. Roost
@@ -16,6 +16,12 @@
 //! 🔔. A line without the prefix still parses (pane = null): that's what a pane
 //! spawned by an older Roost build sends, and callers fall back to the first
 //! Agent pane for it, exactly as before.
+//!
+//! The optional `hook=<Event>` names the Claude Code hook that sent the line
+//! (`Stop`, `UserPromptSubmit`, ...), so Roost can tell which hooks actually
+//! run (`claude_hooks.Liveness`). An older Roost would drop a line with a
+//! token it doesn't know, so roost-notify only adds it when the pane's
+//! `ROOST_PROTOCOL` is 2 or more.
 
 const std = @import("std");
 
@@ -37,12 +43,15 @@ pub const Event = enum {
 pub const Message = struct {
     /// The sender's `ROOST_PANE`, or null when the line didn't carry one.
     pane: ?u32 = null,
+    /// The Claude Code hook that sent it; empty when the line didn't say.
+    hook: []const u8 = "",
     event: Event,
     /// The optional human-readable message; empty when there was none.
     text: []const u8 = "",
 };
 
 const pane_prefix = "pane=";
+const hook_prefix = "hook=";
 
 /// Parse one message line. Null for an empty line, an unknown event, or a
 /// malformed `pane=` prefix. A bad prefix drops the whole line rather than
@@ -55,6 +64,11 @@ pub fn parse(line: []const u8) ?Message {
     if (std.mem.startsWith(u8, rest, pane_prefix)) {
         const tok = nextToken(&rest);
         msg.pane = std.fmt.parseInt(u32, tok[pane_prefix.len..], 10) catch return null;
+    }
+    if (std.mem.startsWith(u8, rest, hook_prefix)) {
+        const tok = nextToken(&rest);
+        msg.hook = tok[hook_prefix.len..];
+        if (msg.hook.len == 0) return null;
     }
 
     const tok = nextToken(&rest);
@@ -109,6 +123,24 @@ test "parse: rejects empty, unknown and malformed lines" {
     try testing.expectEqual(@as(?Message, null), parse("pane= done"));
     try testing.expectEqual(@as(?Message, null), parse("pane=x done"));
     try testing.expectEqual(@as(?Message, null), parse("pane=-1 done"));
+}
+
+test "parse: hook name, after the pane or alone" {
+    const m = parse("pane=4 hook=UserPromptSubmit working").?;
+    try testing.expectEqual(@as(?u32, 4), m.pane);
+    try testing.expectEqualStrings("UserPromptSubmit", m.hook);
+    try testing.expectEqual(Event.working, m.event);
+
+    const n = parse("hook=Notification needs-input Claude needs your permission").?;
+    try testing.expectEqual(@as(?u32, null), n.pane);
+    try testing.expectEqualStrings("Notification", n.hook);
+    try testing.expectEqualStrings("Claude needs your permission", n.text);
+
+    // No name is a broken line; a name with no event is too.
+    try testing.expectEqual(@as(?Message, null), parse("pane=1 hook= done"));
+    try testing.expectEqual(@as(?Message, null), parse("hook=Stop"));
+    // Order is fixed: pane first.
+    try testing.expectEqual(@as(?Message, null), parse("hook=Stop pane=1 done"));
 }
 
 test "parse: the prefix only counts as the first token" {

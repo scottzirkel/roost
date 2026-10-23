@@ -39,6 +39,8 @@ const git = @import("git.zig");
 const actions = @import("actions.zig");
 const ansi = @import("ansi.zig");
 const detect = @import("core/agent_detect.zig");
+const claude_hooks = @import("core/claude_hooks.zig");
+const build_info = @import("build_info.zig");
 
 const log = std.log.scoped(.roost);
 
@@ -86,6 +88,15 @@ const AppContext = struct {
     /// its `closed` signal). Held so in-dialog row handlers can post a toast back
     /// to it. null whenever Settings is closed.
     settings_dialog: ?*adw.PreferencesDialog = null,
+    /// The Settings dialog's Claude Code hook rows, held so adding hooks can
+    /// refresh them in place. Set with `settings_dialog`, cleared on close.
+    hook_widgets: ?HookWidgets = null,
+    /// The hook socket server, for which hooks have run. Null when it
+    /// couldn't start, and until `run` wires it.
+    server: ?*ipc.Server = null,
+    /// Claude turns the screen saw finish with no hook reporting them. See
+    /// `checkUnhookedTurn`.
+    unhooked_turns: u8 = 0,
     /// The attention state currently reflected in the window title. Held so the
     /// timer only touches the title when the rollup actually changes.
     title_attention: tree.DetectState = .unknown,
@@ -401,7 +412,10 @@ pub fn run() !void {
     // than at `server.init` (above) because the AppContext doesn't exist yet at
     // that point. A pointer to the field — which `rebuildWorkspace` reassigns in
     // place — so switching projects re-points the notifications with it.
-    if (have_server) server.project = &app_ctx.current;
+    if (have_server) {
+        server.project = &app_ctx.current;
+        app_ctx.server = &server;
+    }
 
     // 6.5 Agent-state detection. Polls every live agent pane's visible screen so
     //     un-hooked agents (and any agent that isn't Claude) still get a live
@@ -1417,7 +1431,7 @@ fn applyAttention(ctx: *AppContext) void {
 /// into the window title. Runs until the window is torn down.
 fn onDetectTick(data: ?*anyopaque) callconv(.c) c_int {
     const ctx: *AppContext = @ptrCast(@alignCast(data orelse return 0));
-    ctx.workspace.pollAgents();
+    if (ctx.workspace.pollAgents()) checkUnhookedTurn(ctx);
     applyAttention(ctx);
     return 1; // G_SOURCE_CONTINUE
 }
@@ -2890,6 +2904,7 @@ fn presentSettings(a: *AppContext) void {
 
     page.add(panes_group);
     page.add(group);
+    page.add(buildHooksGroup(a));
     page.add(scratch_group);
     page.add(layout_group);
     dialog.add(page);
@@ -2901,6 +2916,7 @@ fn presentSettings(a: *AppContext) void {
 
 fn onSettingsClosed(_: *adw.Dialog, a: *AppContext) callconv(.c) void {
     a.settings_dialog = null;
+    a.hook_widgets = null;
 }
 
 /// Post a short toast to the open Settings dialog (no-op if it's closed).
@@ -2925,6 +2941,274 @@ fn onSaveDefaultLayoutRow(_: *adw.ButtonRow, a: *AppContext) callconv(.c) void {
 fn onClearDefaultLayoutRow(_: *adw.ButtonRow, a: *AppContext) callconv(.c) void {
     project.clearDefaultLayout(a.alloc);
     settingsToast(a, "Default reset to the built-in 2×2");
+}
+
+// --- Claude Code hooks (Settings) ----------------------------------------
+// A missing hook fails silently: the badge just falls back to reading the
+// screen. Settings shows each hook's state so that's visible, and offers to add
+// the missing ones. The checking and file writing live in core/claude_hooks.zig.
+
+/// The `roost-notify` this build ships, which added hooks run. build.sh records
+/// where the clone lives in the generated `build_info.zig`.
+const notify_script = build_info.repo_root ++ "/scripts/roost-notify";
+
+const HookWidgets = struct {
+    group: *adw.PreferencesGroup,
+    rows: [claude_hooks.required.len]*adw.ActionRow,
+    states: [claude_hooks.required.len]*gtk.Label,
+    add_button: *gtk.Button,
+};
+
+/// What the hook files say, merged: the user's settings, then the project's.
+const HookReport = struct {
+    status: claude_hooks.Status = .{},
+    /// Where missing hooks get added. Null without HOME or CLAUDE_CONFIG_DIR.
+    user_path: ?[]const u8 = null,
+    /// Why a settings file couldn't be read, shown in the group description.
+    problem: ?[]const u8 = null,
+    /// False when the user's file can't be read: adding would mean guessing.
+    can_add: bool = true,
+};
+
+const HookState = enum { installed, not_running, missing, script_not_found };
+
+/// Read every settings file Claude Code merges hooks from. Allocates in `arena`.
+fn checkHooks(arena: std.mem.Allocator, project_path: []const u8) HookReport {
+    var report: HookReport = .{};
+    report.user_path = claude_hooks.userSettingsPath(arena) catch null;
+    if (report.user_path) |path| {
+        readHookFile(arena, &report, path, true);
+    } else {
+        report.can_add = false;
+    }
+    const project_files = claude_hooks.projectSettingsPaths(arena, project_path) catch return report;
+    for (project_files) |path| readHookFile(arena, &report, path, false);
+
+    if (report.can_add and report.status.missingCount() > 0) {
+        std.fs.cwd().access(notify_script, .{}) catch {
+            report.problem = std.fmt.allocPrint(arena, "Can't add hooks: {s} is missing", .{tildePath(arena, notify_script)}) catch null;
+            report.can_add = false;
+        };
+    }
+    return report;
+}
+
+fn readHookFile(arena: std.mem.Allocator, report: *HookReport, path: []const u8, is_user: bool) void {
+    const shown = tildePath(arena, path);
+    const bytes = std.fs.cwd().readFileAlloc(arena, path, claude_hooks.max_settings_bytes) catch |err| {
+        if (err == error.FileNotFound) return;
+        report.problem = std.fmt.allocPrint(arena, "Couldn't read {s} ({s})", .{ shown, @errorName(err) }) catch null;
+        if (is_user) report.can_add = false;
+        return;
+    };
+    const status = claude_hooks.check(arena, bytes) catch {
+        report.problem = std.fmt.allocPrint(arena, "{s} isn't valid JSON", .{shown}) catch null;
+        if (is_user) report.can_add = false;
+        return;
+    };
+    report.status.merge(status);
+}
+
+/// A found hook whose script path is absolute but gone (say, the clone moved)
+/// counts as broken. Paths Roost can't resolve are given the benefit of the doubt.
+fn hookState(arena: std.mem.Allocator, script: ?[]const u8) HookState {
+    const path = script orelse return .missing;
+    const home = std.posix.getenv("HOME") orelse "";
+    const expanded = for ([_][]const u8{ "~/", "$HOME/", "${HOME}/" }) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix) and home.len > 0) {
+            break std.fs.path.join(arena, &.{ home, path[prefix.len..] }) catch return .installed;
+        }
+    } else path;
+    if (!std.fs.path.isAbsolute(expanded)) return .installed;
+    std.fs.cwd().access(expanded, .{}) catch return .script_not_found;
+    return .installed;
+}
+
+/// The screen just showed Claude finish a turn that no hook reported. Hooks
+/// are optional, so that only matters when they're installed: then they aren't
+/// reaching Roost, because the session started before they were added, or a
+/// Claude Code update changed them. Waits for a second turn, so a flicker on
+/// screen while Claude starts can't set it off.
+fn checkUnhookedTurn(a: *AppContext) void {
+    const server = a.server orelse return;
+    if (server.warned_hooks) return;
+    a.unhooked_turns +|= 1;
+    if (a.unhooked_turns < 2) return;
+
+    var arena_state: std.heap.ArenaAllocator = .init(a.alloc);
+    defer arena_state.deinit();
+    const report = checkHooks(arena_state.allocator(), a.current.path);
+    if (report.status.scripts[claude_hooks.indexOf("Stop")] == null) return;
+    server.warnHooks(
+        "Claude Code hooks aren't reaching Roost",
+        "Claude finished a turn, but no hook reported it. Sessions started before the hooks were added need a restart. See Settings → Claude Code hooks.",
+    );
+}
+
+/// `path` with the home directory shown as `~`, for display.
+fn tildePath(arena: std.mem.Allocator, path: []const u8) []const u8 {
+    const home = std.posix.getenv("HOME") orelse return path;
+    if (home.len == 0 or !std.mem.startsWith(u8, path, home) or
+        (path.len > home.len and path[home.len] != '/')) return path;
+    return std.mem.concat(arena, u8, &.{ "~", path[home.len..] }) catch path;
+}
+
+fn buildHooksGroup(a: *AppContext) *adw.PreferencesGroup {
+    const group = adw.PreferencesGroup.new();
+    group.setTitle("Claude Code hooks");
+
+    const add_button = gtk.Button.newWithLabel("Add Missing Hooks…");
+    add_button.as(gtk.Widget).setValign(.center);
+    add_button.as(gtk.Widget).addCssClass("suggested-action");
+    _ = gtk.Button.signals.clicked.connect(add_button, *AppContext, onAddHooksClicked, a, .{});
+    group.setHeaderSuffix(add_button.as(gtk.Widget));
+
+    var w: HookWidgets = .{ .group = group, .rows = undefined, .states = undefined, .add_button = add_button };
+    var buf: [64]u8 = undefined;
+    for (claude_hooks.required, &w.rows, &w.states) |hook, *row, *label| {
+        row.* = adw.ActionRow.new();
+        const title = std.fmt.bufPrintZ(&buf, "{s}", .{hook.event}) catch "";
+        row.*.as(adw.PreferencesRow).setTitle(title);
+        label.* = gtk.Label.new(null);
+        row.*.addSuffix(label.*.as(gtk.Widget));
+        group.add(row.*.as(gtk.Widget));
+    }
+    a.hook_widgets = w;
+    refreshHooksGroup(a);
+    return group;
+}
+
+/// Re-read the settings files and update the rows. No-op once Settings closed.
+fn refreshHooksGroup(a: *AppContext) void {
+    const w = a.hook_widgets orelse return;
+    var arena_state: std.heap.ArenaAllocator = .init(a.alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const report = checkHooks(arena, a.current.path);
+    const liveness: claude_hooks.Liveness = if (a.server) |server| server.liveness else .{};
+    const quiet = liveness.silent();
+
+    var any_broken = false;
+    for (claude_hooks.required, report.status.scripts, liveness.runs, w.rows, w.states, 0..) |hook, script, runs, row, label, i| {
+        var hook_state = hookState(arena, script);
+        if (hook_state == .installed and quiet == i) hook_state = .not_running;
+        any_broken = any_broken or hook_state == .script_not_found;
+        const subtitle = switch (hook_state) {
+            .installed => switch (runs) {
+                0 => std.fmt.allocPrintSentinel(arena, "{s}. Hasn't run in this window yet.", .{hook.purpose}, 0),
+                1 => std.fmt.allocPrintSentinel(arena, "{s}. Ran once in this window.", .{hook.purpose}, 0),
+                else => std.fmt.allocPrintSentinel(arena, "{s}. Ran {d} times in this window.", .{ hook.purpose, runs }, 0),
+            },
+            .not_running => arena.dupeZ(u8, "Installed, but hasn't run while the other hooks have. A Claude Code update may have changed it."),
+            .missing => arena.dupeZ(u8, hook.purpose),
+            .script_not_found => std.fmt.allocPrintSentinel(arena, "roost-notify not found: {s}", .{script.?}, 0),
+        } catch continue;
+        row.setSubtitle(subtitle);
+
+        const lw = label.as(gtk.Widget);
+        for ([_][*:0]const u8{ "success", "warning", "error" }) |class| lw.removeCssClass(class);
+        switch (hook_state) {
+            .installed => {
+                label.setLabel("Installed");
+                lw.addCssClass("success");
+            },
+            .not_running => {
+                label.setLabel("Not running");
+                lw.addCssClass("error");
+            },
+            .missing => {
+                label.setLabel("Missing");
+                lw.addCssClass("warning");
+            },
+            .script_not_found => {
+                label.setLabel("Broken");
+                lw.addCssClass("error");
+            },
+        }
+    }
+
+    const description: [:0]const u8 = if (report.problem) |p|
+        arena.dupeZ(u8, p) catch ""
+    else if (any_broken)
+        std.fmt.allocPrintSentinel(arena, "A hook runs a roost-notify that doesn't exist, maybe from a moved clone. Fix its path in {s}.", .{tildePath(arena, report.user_path orelse "settings.json")}, 0) catch ""
+    else
+        "How Roost knows what the agent is doing. Without them, it reads the screen.";
+    w.group.setDescription(description);
+    w.add_button.as(gtk.Widget).setVisible(@intFromBool(report.can_add and report.status.missingCount() > 0));
+}
+
+/// Ask before touching the user's Claude Code settings.
+fn onAddHooksClicked(_: *gtk.Button, a: *AppContext) callconv(.c) void {
+    var arena_state: std.heap.ArenaAllocator = .init(a.alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const report = checkHooks(arena, a.current.path);
+    const user_path = report.user_path orelse return;
+    if (!report.can_add) return;
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (claude_hooks.required, report.status.scripts) |hook, script| {
+        if (script == null) names.append(arena, hook.event) catch return;
+    }
+    if (names.items.len == 0) return refreshHooksGroup(a);
+
+    const last = names.pop().?;
+    const listed = if (names.items.len == 0)
+        last
+    else
+        std.mem.concat(arena, u8, &.{ std.mem.join(arena, ", ", names.items) catch return, " and ", last }) catch return;
+    const body = std.fmt.allocPrintSentinel(arena,
+        \\Roost will add the {s} {s} to {s}. {s} {s}. Your current file is kept as {s}.roost-backup.
+        \\
+        \\Claude Code sessions that are already running need a restart to use them.
+    , .{
+        listed,
+        if (names.items.len == 0) "hook" else "hooks",
+        tildePath(arena, user_path),
+        if (names.items.len == 0) "It runs" else "Each runs",
+        tildePath(arena, notify_script),
+        std.fs.path.basename(user_path),
+    }, 0) catch return;
+
+    const heading: [*:0]const u8 = if (names.items.len == 0) "Add a Claude Code hook?" else "Add Claude Code hooks?";
+    const dialog = adw.AlertDialog.new(heading, body);
+    dialog.addResponse("cancel", "Cancel");
+    dialog.addResponse("add", "Add Hooks");
+    dialog.setResponseAppearance("add", .suggested);
+    dialog.setDefaultResponse("add");
+    dialog.setCloseResponse("cancel");
+    const parent = if (a.settings_dialog) |d| d.as(gtk.Widget) else a.window.as(gtk.Widget);
+    dialog.choose(parent, null, onAddHooksResponse, a);
+}
+
+/// `gio.AsyncReadyCallback` for `onAddHooksClicked`. Re-checks the files rather
+/// than trusting what was shown, in case Claude Code changed them meanwhile.
+fn onAddHooksResponse(source: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return));
+    const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
+    if (std.mem.orderZ(u8, "add", dialog.chooseFinish(res)) != .eq) return;
+
+    var arena_state: std.heap.ArenaAllocator = .init(a.alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const report = checkHooks(arena, a.current.path);
+    const user_path = report.user_path orelse return;
+    if (!report.can_add) return refreshHooksGroup(a);
+
+    var missing: std.ArrayListUnmanaged(claude_hooks.Hook) = .empty;
+    for (claude_hooks.required, report.status.scripts) |hook, script| {
+        if (script == null) missing.append(arena, hook) catch return;
+    }
+    if (missing.items.len > 0) {
+        claude_hooks.install(a.alloc, user_path, missing.items, notify_script) catch |err| {
+            log.warn("could not add Claude Code hooks to {s} err={}", .{ user_path, err });
+            settingsToast(a, "Couldn't update Claude Code settings");
+            return refreshHooksGroup(a);
+        };
+        log.info("added {d} Claude Code hook(s) to {s}", .{ missing.items.len, user_path });
+        settingsToast(a, if (missing.items.len == 1) "Added 1 hook" else "Added the missing hooks");
+    }
+    refreshHooksGroup(a);
 }
 
 fn onShowSettings(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {

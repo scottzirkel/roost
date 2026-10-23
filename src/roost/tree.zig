@@ -936,39 +936,45 @@ pub const Tree = struct {
     /// hook-driven or have no running child are skipped outright, and the
     /// capture is bounded to the visible screen (`captureScreen`, not
     /// `captureText`), so cost tracks window size rather than scrollback depth.
-    pub fn pollAgents(self: *Tree) void {
-        self.pollWalk(self.root);
+    ///
+    /// Returns true when the screen showed Claude finish a turn in a pane no
+    /// hook has reported for. With hooks installed, that means they aren't
+    /// reaching Roost, which the caller checks and warns about.
+    pub fn pollAgents(self: *Tree) bool {
+        return self.pollWalk(self.root);
     }
 
-    fn pollWalk(self: *Tree, node: *Node) void {
+    fn pollWalk(self: *Tree, node: *Node) bool {
         switch (node.*) {
             .split => |*s| {
-                self.pollWalk(s.start);
-                self.pollWalk(s.end);
+                // Poll both sides, whatever the first returns.
+                const start = self.pollWalk(s.start);
+                const end = self.pollWalk(s.end);
+                return start or end;
             },
-            .leaf => |*l| self.pollLeaf(l),
+            .leaf => |*l| return self.pollLeaf(l),
         }
     }
 
-    fn pollLeaf(self: *Tree, leaf: *Leaf) void {
-        if (leaf.role != .agent) return;
+    fn pollLeaf(self: *Tree, leaf: *Leaf) bool {
+        if (leaf.role != .agent) return false;
         // Hooks own this pane; scraping would only add flicker.
-        if (leaf.agent.hooked) return;
+        if (leaf.agent.hooked) return false;
         const term = switch (leaf.pane) {
             .terminal => |*t| t,
-            .scratchpad => return,
+            .scratchpad => return false,
         };
         // Nothing running: leave the badge as-is (the pane auto-closes on exit).
-        if (!term.hasLiveProcess()) return;
+        if (!term.hasLiveProcess()) return false;
 
-        const screen = term.captureScreen(self.alloc) orelse return;
+        const screen = term.captureScreen(self.alloc) orelse return false;
         defer self.alloc.free(screen);
 
         const changed = leaf.agent.observe(leaf.manifest, .{
             .screen = screen,
             .title = term.title() orelse "",
         });
-        if (!changed) return;
+        if (!changed) return false;
         log.debug("agent pane ({s}): {s} via rule {s}", .{
             leaf.manifest.id,
             @tagName(leaf.agent.state),
@@ -977,6 +983,7 @@ pub const Tree = struct {
         if (AgentStatus.fromDetect(leaf.agent.state)) |status| {
             leaf.label.setText(status.badge());
         }
+        return leaf.agent.state == .done and std.mem.eql(u8, leaf.manifest.id, "claude");
     }
 
     /// The state across all agent panes that most wants the user's attention

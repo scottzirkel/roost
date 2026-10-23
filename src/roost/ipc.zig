@@ -18,7 +18,11 @@
 //!     needs-input msg  -> "Agent needs you"     (notification + 🔔 badge)
 //!     working          -> (no notification)     (● working badge only)
 //!     pane=3 done     -> the same, for the pane whose ROOST_PANE is 3
+//!     hook=Stop done  -> the same, naming the Claude Code hook that sent it
 //! Unknown events are ignored. Parsing lives in `core/hook_msg.zig`.
+//!
+//! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
+//! that's installed never has, the server warns once with a notification.
 //!
 //! ADDITIVE: our own file. It names Ghostty's `Application` only to send a
 //! notification the exact way Ghostty itself does (see application.zig's
@@ -38,6 +42,7 @@ const Workspace = layout.Workspace;
 const Config = @import("config.zig").Config;
 const Project = @import("project.zig").Project;
 const hook_msg = @import("core/hook_msg.zig");
+const claude_hooks = @import("core/claude_hooks.zig");
 
 const log = std.log.scoped(.roost_ipc);
 
@@ -75,6 +80,11 @@ pub const Server = struct {
     /// that function's frame. Only ever touched on the main loop (GLib delivers
     /// socket reads there), so a single shared buffer is safe.
     title_buf: [512]u8 = undefined,
+    /// Which Claude Code hooks have reached this window. Settings shows it.
+    liveness: claude_hooks.Liveness = .{},
+    /// Set once the hooks-look-wrong notification has been shown, so it shows
+    /// once per window rather than on every hook after.
+    warned_hooks: bool = false,
     /// Owned socket path (heap); unlinked + freed on `deinit`.
     path: [:0]u8,
     /// The listening service. Started on `init`; stopped/freed on `deinit`.
@@ -145,6 +155,9 @@ pub const Server = struct {
         // Export the path so every spawned pane (and the agent's hooks) can
         // reach us. MUST happen before the workspace spawns its panes.
         _ = internal_os.setenv("ROOST_SOCK", path);
+        // The newest message format this build parses (see core/hook_msg.zig).
+        // roost-notify only names its hook when this says it may.
+        _ = internal_os.setenv("ROOST_PROTOCOL", "2");
 
         log.info("ipc listening on {s} (exported as ROOST_SOCK)", .{path});
     }
@@ -219,12 +232,21 @@ pub const Server = struct {
         };
         const rest = msg.text;
 
-        log.info("agent event: {s} pane={?d}{s}{s}", .{
+        log.info("agent event: {s} pane={?d} hook={s}{s}{s}", .{
             @tagName(msg.event),
             msg.pane,
+            msg.hook,
             if (rest.len > 0) " — " else "",
             rest,
         });
+        if (msg.hook.len > 0) {
+            self.liveness.record(msg.hook);
+            if (self.liveness.silent()) |i| {
+                var buf: [256]u8 = undefined;
+                const body = std.fmt.bufPrint(&buf, "Claude Code's {s} hook hasn't run, though its other hooks have. A Claude Code update may have changed it. See Settings → Claude Code hooks.", .{claude_hooks.required[i].event}) catch "";
+                self.warnHooks("Claude Code hook not running", body);
+            }
+        }
 
         // Update the sender's Agent-pane badge for every known event.
         self.workspace.setAgentStatus(msg.pane, statusOf(msg.event));
@@ -242,6 +264,15 @@ pub const Server = struct {
                 self.playSound("complete");
             },
         }
+    }
+
+    /// Say once per window that the Claude Code hooks look wrong. Its own
+    /// notification id, so it never replaces an agent's popup.
+    pub fn warnHooks(self: *Server, title: [:0]const u8, body: []const u8) void {
+        if (self.warned_hooks) return;
+        self.warned_hooks = true;
+        log.warn("{s}: {s}", .{ title, body });
+        notifyApp(self.app.as(gio.Application), "roost-hooks", self.titled(title), body);
     }
 
     /// Raise a native desktop notification. Mirrors Ghostty's own

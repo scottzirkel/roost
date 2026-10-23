@@ -11,13 +11,20 @@ In 2026 two things broke quietly for months: the hooks never reported
 "working", and Claude Code changed its spinner, so a busy agent looked idle.
 This step makes that kind of breakage visible.
 
-- [ ] A GitHub Action runs the unit tests and `scripts/check-core.sh` on every
+- [x] A GitHub Action runs the unit tests and `scripts/check-core.sh` on every
       push.
-- [ ] Settings shows whether the Claude Code hooks are installed and complete,
+- [x] Settings shows whether the Claude Code hooks are installed and complete,
       with a button that adds missing ones after asking.
+- [x] Roost warns once when installed hooks don't run: one hook stays silent
+      while the others report, or the screen shows Claude finishing turns that
+      no hook reported.
 - [ ] Decide between debug and release builds for daily use. Debug builds are
       slower but log more; see
       [build modes](docs/development.md#build-modes).
+
+The one gap left is a change in how an agent's screen looks. CI replays saved
+screens, so it can't see a new Claude Code release; re-probe after updates (see
+[probing an agent CLI](docs/development.md#probing-an-agent-cli)).
 
 ## Next: a Waybar indicator
 

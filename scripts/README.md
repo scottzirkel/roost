@@ -8,6 +8,7 @@
 | [`roost.desktop`](#roostdesktop--the-desktop-launcher) | The desktop launcher entry. |
 | [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
 | [`check-core.sh`](#check-coresh--the-core-purity-check) | Fails the build if `src/roost/core/` imports a UI toolkit. |
+| [`test.sh`](#testsh--the-checks-ci-runs) | Runs the core check and every unit test; CI runs the same script. |
 | [`patch-zig-linker.sh`](#patch-zig-linkersh--arch-linker-workaround) | Works around an Arch + Zig 0.15.2 linker bug. |
 
 Paths below use `/path/to/roost` for your clone.
@@ -23,8 +24,11 @@ desktop notification and a status badge when the agent finishes or needs you.
    **`ROOST_SOCK`**. Every pane Roost spawns inherits it. Each pane also gets
    its own **`ROOST_PANE`**, a number that names that pane.
 2. `roost-notify` connects to `$ROOST_SOCK` and writes one short line:
-   `[pane=<id>] <event> [message]`, where `<event>` is `done`, `needs-input`
-   or `working`, and `<id>` is `$ROOST_PANE`.
+   `[pane=<id>] [hook=<Event>] <event> [message]`, where `<event>` is `done`,
+   `needs-input` or `working`, and `<id>` is `$ROOST_PANE`. `hook=` names the
+   Claude Code hook that ran, so Roost can tell which hooks actually run. It's
+   only sent when the pane's `ROOST_PROTOCOL` is 2 or more, because an older
+   Roost would drop a line with a field it doesn't know.
 3. Roost shows a native notification (for `done` and `needs-input`) and updates
    the badge of the Agent pane the agent runs in. A line without `pane=` goes
    to the first Agent pane.
@@ -33,6 +37,14 @@ If `ROOST_SOCK` is unset or the socket is gone, `roost-notify` does nothing and
 exits 0, so it can never break your agent.
 
 ### Install
+
+The easy way: open **Settings → Claude Code hooks** in Roost and click **Add
+Missing Hooks…**. Roost asks first, then adds the missing entries to
+`~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`), runs this
+clone's `roost-notify`, and keeps the old file as `settings.json.roost-backup`.
+Everything else in the file stays as it was.
+
+By hand:
 
 1. Make the helper executable (once):
 
@@ -91,6 +103,22 @@ With Roost running, from any pane inside it:
 /path/to/roost/scripts/roost-notify done
 ```
 
+### Checking that the hooks work
+
+Settings shows each hook as Installed, Missing, Broken (its `roost-notify`
+path doesn't exist) or Not running, plus how often it has run in this window.
+Roost also warns once, with a notification, when the evidence doesn't add up:
+
+- Claude finished turns, but one installed hook (UserPromptSubmit or Stop)
+  never ran while the other did. A Claude Code update may have renamed it.
+- The screen showed Claude finish two turns, but no hook reached Roost at all,
+  while the Stop hook is installed. Usually the session started before the
+  hooks were added and needs a restart.
+
+These catch hooks that stop running. They can't catch Claude Code changing
+what its screen looks like; see
+[Probing an agent CLI](../docs/development.md#probing-an-agent-cli).
+
 ## `roost-launch` — the CLI launcher
 
 Makes the `roost` command a pure launcher. It starts Roost in its own session
@@ -132,6 +160,13 @@ Safe to re-run after editing the SVG. Needs `rsvg-convert` (librsvg).
 Fails if anything in `src/roost/core/` imports GTK, libadwaita, GLib or
 Ghostty. `build.sh` runs it on every build. See
 [the portable core](../docs/architecture.md#the-portable-core).
+
+## `test.sh` — the checks CI runs
+
+Runs `check-core.sh`, then `zig test` on every file in `src/roost/core/` and on
+the other std-only files. It needs only Zig, not GTK or the Ghostty checkout.
+The GitHub Action in `.github/workflows/ci.yml` runs this same script on every
+push.
 
 ## `patch-zig-linker.sh` — Arch linker workaround
 
