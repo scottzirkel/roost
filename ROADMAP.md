@@ -26,6 +26,19 @@ The one gap left is a change in how an agent's screen looks. CI replays saved
 screens, so it can't see a new Claude Code release; re-probe after updates (see
 [probing an agent CLI](docs/development.md#probing-an-agent-cli)).
 
+## Soon: keep the agent's conversation across a reload
+
+Reload (`Ctrl+Shift+Q`) restarts every pane, so a running Claude Code session
+ends, and you have to find it again with `/resume`.
+
+- [ ] Remember each Agent pane's Claude session. Every hook payload carries a
+      `session_id`, so `roost-notify` can send it along with the hook name
+      (a new `ROOST_PROTOCOL` version), and Roost saves it with the layout.
+- [ ] After a reload, start that pane's agent with `claude --resume <id>`, so
+      the conversation picks up where it was.
+- [ ] Do this only for reload. A new window, or reopening a project after
+      quitting, still starts a fresh session.
+
 ## Next: a Waybar indicator
 
 See every window's agent state from the bar, and jump to the window that needs
