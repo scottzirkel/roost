@@ -99,17 +99,23 @@ A good isolated instance:
   `scratchpad-autosave = false` in `<scratch config>/roost/config`.
 - **Picks its project and agent** with `ROOST_PROJECT` and `ROOST_AGENT`, and
   unsets any inherited `ROOST_SOCK` and `ROOST_PANE`.
-- **Stays out of the way.** On Hyprland, move the window to a hidden special
-  workspace as soon as `hyprctl clients -j` lists its PID. Hyprland 0.56
-  dispatches in Lua; the old `movetoworkspacesilent` form fails and leaves the
-  window on screen:
+- **Never shows, and never takes focus.** On Hyprland, a window rule has to
+  catch it as it opens. Moving it afterwards is too late: a new window takes
+  focus for up to a second, which makes every other window's header flash.
+  Name the scratch project `roost-hidden-test`, since the title is set before
+  the window first shows, and switch the rule on with `hyprctl eval`. A rule
+  handle's `set_enabled` turns it off again:
 
   ```sh
-  hyprctl dispatch 'hl.dsp.window.move({ workspace = "special:roosttest", follow = false, window = "pid:<pid>" })'
+  hyprctl eval 'if not roost_test_window then roost_test_window = hl.window_rule({ match = { class = "dev.scottzirkel.Roost", initial_title = ".*roost-hidden-test.*" }, workspace = "special:roosttest silent", no_initial_focus = true }) end roost_test_window:set_enabled(true)'
+  # … run the test …
+  hyprctl eval 'roost_test_window:set_enabled(false)'
   ```
 
-  Wait until the PID is listed, because an unmatched selector could act on the
-  focused window. The window still shows for about a second before it moves.
+  Roost's own dialogs, such as the reload confirmation, open as separate
+  windows with class `GTK Application`. A rule for one (for example
+  `initial_title = "^Reload Roost.$"`) would also catch the user's real
+  dialogs. Switch it on only for the second the test needs it.
 
 Synthetic key presses (`hl.dsp.send_key_state`) didn't reach a parked window
 in testing. Drive behavior another way:
