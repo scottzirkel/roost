@@ -65,6 +65,9 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Many agents at once** — every Agent pane tracks its own state, and the
   window title rolls up whichever one most wants you (`🔔` > `✓` > `●`), so a
   Roost window that needs you says so from the taskbar.
+- **Every window from the bar** — `roost status --all` lists every Roost
+  window's project, branch and agent state. On Omarchy, a bar widget shows the
+  counts and jumps to any window in one click.
 - **Wired actions** — define commands like "run the tests" per project, run them
   from the header menu or `Ctrl+Shift+P`, and route the output by result:
   failures to the Agent pane, a passing run to a notification.
@@ -153,6 +156,23 @@ roost status --all --watch   # JSON now and on every change, for a desktop bar
 
 A window running an older build doesn't answer; it's listed until you reload
 it.
+
+### On the Omarchy bar
+
+On Omarchy, Roost can add a widget to the bar: 󱗆, plus how many windows have
+an agent that needs you (󰂚), is working (●) or is done (✓). Left-click it to
+list every Roost window with its project, branch and state, then click one to
+jump to it. Right-click jumps straight to the window that needs you.
+
+```sh
+scripts/install-omarchy-widget.sh                           # add it to the bar
+scripts/install-omarchy-widget.sh --before omarchy.agents   # or choose where
+```
+
+Run the script again after pulling to update the widget. To remove it, run
+`omarchy plugin disable dev.scottzirkel.roost`. It needs `roost` on your PATH
+(see [`scripts/README.md`](scripts/README.md#roost-launch--the-cli-launcher)).
+Any other bar can run `roost status --all --watch` and read its JSON lines.
 
 ### Keybindings
 

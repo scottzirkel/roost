@@ -5,25 +5,11 @@ things work lives in [docs/architecture.md](docs/architecture.md).
 
 Last updated 2026-10-23.
 
-## Now: a bar indicator
+## Now: the control API
 
-See every window's agent state from the desktop bar, and jump to any window.
-
-- [x] The socket answers requests, starting with `status`: the window's
-      project, branch and agent state.
-- [x] `roost status --all` asks every running window.
-- [ ] An Omarchy bar widget shows 🔔 and ● counts and lists every window.
-      Clicking one focuses it. Omarchy's own shell has replaced Waybar, so
-      the widget is an Omarchy plugin; `roost status --all --watch` works
-      for any other bar.
-
-This is the first slice of the control API below: the same socket and the same
-message format.
-
-## Next: the control API
-
-A `roost` command that the agent, or you, can run inside a pane to drive its
-window:
+More `roost` commands that the agent, or you, can run inside a pane to drive
+its window. They build on the socket and message format `roost status`
+already uses.
 
 - `roost scratch read` and `roost scratch append "…"` read your notes and write
   back a plan or summary.

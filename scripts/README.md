@@ -6,6 +6,7 @@
 | [`claude-hooks.json`](#roost-notify--agent-hooks) | The hook snippet to merge into `~/.claude/settings.json`. |
 | [`roost-launch`](#roost-launch--the-cli-launcher) | The `roost` command: starts Roost detached from the terminal, or runs `roost status`. |
 | [`roost.desktop`](#roostdesktop--the-desktop-launcher) | The desktop launcher entry. |
+| [`install-omarchy-widget.sh`](#install-omarchy-widgetsh--the-omarchy-bar-widget) | Adds Roost's widget to the Omarchy bar. |
 | [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
 | [`check-core.sh`](#check-coresh--the-core-purity-check) | Fails the build if `src/roost/core/` imports a UI toolkit. |
 | [`test.sh`](#testsh--the-checks-ci-runs) | Runs the core check and every unit test; CI runs the same script. |
@@ -149,6 +150,21 @@ Output and startup errors go to `${XDG_STATE_HOME:-~/.local/state}/roost.log`.
 If the binary is missing, the wrapper fails before closing the terminal, so a
 broken launch is never hidden. To launch without closing the terminal, run the
 binary directly: `vendor/ghostty/zig-out/bin/roost`.
+
+## `install-omarchy-widget.sh` — the Omarchy bar widget
+
+Copies `integrations/omarchy` into the Omarchy shell's plugin folder
+(`~/.config/omarchy/plugins/dev.scottzirkel.roost`), checks it with
+`omarchy plugin validate`, and adds it to the bar. Placement options go to
+`omarchy plugin enable`:
+
+```sh
+scripts/install-omarchy-widget.sh --before omarchy.agents
+```
+
+Run it again after pulling; the shell reloads the changed files itself. It
+copies rather than links, because Omarchy refuses symlinks in a plugin folder.
+The widget runs `roost status --all --watch`, so `roost` must be on the PATH.
 
 ## `roost.desktop` — the desktop launcher
 

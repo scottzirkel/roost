@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.scottzirkel.roost",
+  "name": "Roost",
+  "version": "1.0.0",
+  "author": "Scott Zirkel",
+  "description": "Every Roost window's agent state on the bar, and a click to jump to one",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Roost",
+    "description": "Roost windows and what their agents are doing",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "command": "roost" },
+    "schema": [
+      { "key": "command", "type": "string", "label": "Roost command" }
+    ]
+  }
+}
