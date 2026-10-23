@@ -25,8 +25,8 @@
 //! The same socket answers requests (`core/control.zig`): a `status` line gets
 //! one line of JSON back with the window's project, branch and agent state.
 //! That's how `roost status` and the desktop bar see every window. The
-//! `scratch-read` and `scratch-append` requests are `roost scratch`, which lets
-//! the agent read and add to the Scratchpad.
+//! `scratch-*` requests are `roost scratch`, which lets the agent read, add to
+//! and, when asked, rewrite the Scratchpad.
 //!
 //! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
 //! that's installed never has, the server warns once with a notification.
@@ -336,6 +336,11 @@ pub const Server = struct {
             .scratch_append => |text| {
                 const pad = self.workspace.scratchpad() orelse return no_pad.write(w);
                 pad.appendBlock(text);
+                try (control.Reply{ .ok = true }).write(w);
+            },
+            .scratch_replace => |text| {
+                const pad = self.workspace.scratchpad() orelse return no_pad.write(w);
+                pad.replaceAll(text);
                 try (control.Reply{ .ok = true }).write(w);
             },
             .agent_note => try (control.Reply{ .text = control.agent_note }).write(w),

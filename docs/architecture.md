@@ -193,10 +193,16 @@ The window replies with one line of JSON and closes.
 - **Request words never collide with hook events.** An older Roost reads a
   request as an unknown event and closes without a reply, so clients list it
   with only its pid.
-- **`scratch-read` and `scratch-append`** are `roost scratch`. They act on the
-  window's first Scratchpad pane. An append adds a new paragraph at the end
-  as one undo step, and autosave writes it like typing. The text travels as
-  JSON, so its newlines stay inside the one line.
+- **`scratch-read`, `scratch-append` and `scratch-replace`** are
+  `roost scratch`. They act on the window's first Scratchpad pane. An append
+  adds a new paragraph at the end; a replace swaps the whole text, and
+  `roost scratch clear` is a replace with none. Each is one undo step, and
+  autosave writes it like typing. The text travels as JSON, so its newlines
+  stay inside the one line.
+- **The agent may remove what you wrote, but only when you ask.** It reads,
+  makes the change, and sends the whole text back. The agent note says so;
+  the window can't tell who asked. A replace loses anything typed between the
+  read and the write, and `Ctrl+Z` brings that back too.
 - **A line ends at a newline, or when the client closes.** Requests send a
   newline so they can wait for the answer; `roost-notify` just closes. Reads
   continue until the line is complete, up to 512 KB. Hook lines are still cut

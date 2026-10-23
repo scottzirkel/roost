@@ -249,6 +249,29 @@ pub const ScratchpadPane = struct {
         _ = self.text_view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
     }
 
+    /// Swap the whole buffer for `bytes` (`roost scratch replace`), ending in
+    /// one newline, or empty it when `bytes` is empty. One user action, so a
+    /// single Ctrl+Z brings the old text back.
+    pub fn replaceAll(self: *ScratchpadPane, bytes: []const u8) void {
+        const text = std.mem.trimRight(u8, bytes, "\n");
+        const z = std.fmt.allocPrintSentinel(self.alloc, "{s}{s}", .{ text, if (text.len > 0) "\n" else "" }, 0) catch return;
+        defer self.alloc.free(z);
+        const buffer = self.text_view.getBuffer();
+
+        buffer.beginUserAction();
+        var start: gtk.TextIter = undefined;
+        var end: gtk.TextIter = undefined;
+        buffer.getBounds(&start, &end);
+        buffer.delete(&start, &end);
+        buffer.getEndIter(&end);
+        buffer.insert(&end, z.ptr, @intCast(z.len));
+        buffer.endUserAction();
+
+        buffer.getStartIter(&start);
+        buffer.placeCursor(&start);
+        _ = self.text_view.scrollToIter(&start, 0.0, 0, 0.0, 0.0);
+    }
+
     // --- live styling -----------------------------------------------------
 
     /// Re-derive and re-apply all markdown styling over the whole buffer. Cheap

@@ -7,6 +7,8 @@
 //!     roost status --all --watch   JSON now and on every change, for a bar
 //!     roost scratch read           print this window's Scratchpad
 //!     roost scratch append [text]  add to it: the text, or stdin
+//!     roost scratch replace [text] swap all of it for new text
+//!     roost scratch clear          empty it
 //!
 //! It's the same binary that runs the window: `main` offers its argv here
 //! first, and starts the window only when the first word isn't a command.
@@ -23,12 +25,18 @@ const control = @import("core/control.zig");
 const scratch_usage =
     \\usage: roost scratch read
     \\       roost scratch append [text...]
+    \\       roost scratch replace [text...]
+    \\       roost scratch clear
     \\
-    \\Reads or adds to the Scratchpad of the Roost window this pane is in.
+    \\Reads or changes the Scratchpad of the Roost window this pane is in.
     \\
     \\  read     print the Scratchpad's Markdown
     \\  append   add Markdown to the end, as a new paragraph: the arguments,
     \\           or stdin when there are none. What's there stays as it is.
+    \\  replace  swap the whole Scratchpad for new Markdown, given the same way
+    \\  clear    empty the Scratchpad
+    \\
+    \\One Ctrl+Z in the Scratchpad undoes an append, a replace or a clear.
     \\
 ;
 
@@ -89,8 +97,9 @@ pub fn run(args: []const [:0]const u8) u8 {
     return code;
 }
 
-/// `roost scratch read|append` against the window at `sock` (ROOST_SOCK).
-/// `stdin` is null when it's a terminal, so `append` doesn't sit waiting.
+/// `roost scratch read|append|replace|clear` against the window at `sock`
+/// (ROOST_SOCK). `stdin` is null when it's a terminal, so `append` and
+/// `replace` don't sit waiting.
 fn scratch(
     a: std.mem.Allocator,
     args: []const [:0]const u8,
@@ -104,36 +113,42 @@ fn scratch(
         out.writeAll(scratch_usage) catch {};
         return 0;
     }
+    const append = std.mem.eql(u8, sub, "append");
     const req: control.Request = if (std.mem.eql(u8, sub, "read") and args.len == 1)
         .scratch_read
-    else if (std.mem.eql(u8, sub, "append")) req: {
+    else if (std.mem.eql(u8, sub, "clear") and args.len == 1)
+        .{ .scratch_replace = "" }
+    else if (append or std.mem.eql(u8, sub, "replace")) req: {
         const text = if (args.len > 1)
             std.mem.join(a, " ", args[1..]) catch return 1
         else if (stdin) |in|
             in.allocRemaining(a, .limited(control.Request.max_line)) catch |e| {
                 if (e == error.StreamTooLong)
-                    err.print("roost scratch append: that's too long. The limit is {d} KB.\n", .{control.Request.max_line / 1024}) catch {}
+                    err.print("roost scratch {s}: that's too long. The limit is {d} KB.\n", .{ sub, control.Request.max_line / 1024 }) catch {}
                 else
-                    err.writeAll("roost scratch append: couldn't read stdin.\n") catch {};
+                    err.print("roost scratch {s}: couldn't read stdin.\n", .{sub}) catch {};
                 return 1;
             }
         else {
-            err.writeAll("roost scratch append: give the text as arguments, or pipe it in.\n\n") catch {};
+            err.print("roost scratch {s}: give the text as arguments, or pipe it in.\n\n", .{sub}) catch {};
             err.writeAll(scratch_usage) catch {};
             return 2;
         };
         if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) {
-            err.writeAll("roost scratch append: nothing to add.\n") catch {};
+            if (append)
+                err.writeAll("roost scratch append: nothing to add.\n") catch {}
+            else
+                err.writeAll("roost scratch replace: nothing to put there. To empty the Scratchpad, use roost scratch clear.\n") catch {};
             return 1;
         }
         if (!control.isText(text)) {
-            err.writeAll("roost scratch append: that isn't text. The Scratchpad takes UTF-8.\n") catch {};
+            err.print("roost scratch {s}: that isn't text. The Scratchpad takes UTF-8.\n", .{sub}) catch {};
             return 1;
         }
-        break :req .{ .scratch_append = text };
+        break :req if (append) .{ .scratch_append = text } else .{ .scratch_replace = text };
     } else {
         if (sub.len == 0)
-            err.writeAll("roost scratch: say read or append.\n\n") catch {}
+            err.writeAll("roost scratch: say read, append, replace or clear.\n\n") catch {}
         else
             err.print("roost scratch: unknown command '{s}'\n\n", .{std.mem.join(a, " ", args) catch sub}) catch {};
         err.writeAll(scratch_usage) catch {};
@@ -147,7 +162,7 @@ fn scratch(
     var line: std.Io.Writer.Allocating = .init(a);
     req.write(&line.writer) catch return 1;
     if (line.written().len > control.Request.max_line) {
-        err.print("roost scratch append: that's too long. The limit is {d} KB.\n", .{control.Request.max_line / 1024}) catch {};
+        err.print("roost scratch {s}: that's too long. The limit is {d} KB.\n", .{ sub, control.Request.max_line / 1024 }) catch {};
         return 1;
     }
 
@@ -547,6 +562,26 @@ test "scratch: append sends stdin, or the arguments" {
     try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{ "append", "fix", "it" }, null, "scratch-append {\"text\":\"fix it\"}\n", "{\"ok\":true}\n", &out, &err));
     try testing.expectEqualStrings("", out.buffered());
     try testing.expectEqualStrings("", err.buffered());
+}
+
+test "scratch: replace sends the new text, and clear sends none" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [512]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    var in: std.Io.Reader = .fixed("## Next\n");
+    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"replace"}, &in, "scratch-replace {\"text\":\"## Next\\n\"}\n", "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"clear"}, null, "scratch-replace {\"text\":\"\"}\n", "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqualStrings("", err.buffered());
+
+    // An empty replace would clear by accident, so it takes `clear` to do that.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var blank: std.Io.Reader = .fixed("\n");
+    try testing.expectEqual(@as(u8, 1), scratch(arena.allocator(), &.{"replace"}, "/nonexistent", &blank, &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "use roost scratch clear") != null);
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), scratch(arena.allocator(), &.{ "clear", "all" }, "/nonexistent", null, &out, &err));
 }
 
 test "scratch: the window's error, an older window, and mistakes" {

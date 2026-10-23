@@ -12,6 +12,7 @@
 //!     status                         ->  {"pid":1234,"project":"/home/me/app","name":"app","branch":"main","state":"needs-input"}
 //!     scratch-read                   ->  {"text":"# Notes\n..."}
 //!     scratch-append {"text":"..."}  ->  {"ok":true}
+//!     scratch-replace {"text":"..."} ->  {"ok":true}
 //!     agent-note                     ->  {"text":"You're running in a pane of a Roost window..."}
 //! A request the window can't carry out gets {"error":"..."}.
 //!
@@ -34,6 +35,9 @@ pub const Request = union(enum) {
     scratch_read,
     /// Add Markdown to the end of the scratchpad, as its own paragraph.
     scratch_append: []const u8,
+    /// Swap the whole scratchpad for this text; empty clears it. For when the
+    /// user asks the agent to remove or rewrite something.
+    scratch_replace: []const u8,
     /// `agent_note`, as `Reply.text`, so it always matches what this window
     /// supports. An older window doesn't answer, so it advertises nothing.
     agent_note,
@@ -51,14 +55,15 @@ pub const Request = union(enum) {
         const word = if (sp) |i| trimmed[0..i] else trimmed;
         const rest = if (sp) |i| std.mem.trim(u8, trimmed[i + 1 ..], " \t") else "";
 
-        if (std.mem.eql(u8, word, "scratch-append")) {
+        const append = std.mem.eql(u8, word, "scratch-append");
+        if (append or std.mem.eql(u8, word, "scratch-replace")) {
             const Args = struct { text: []const u8 };
             const args = std.json.parseFromSliceLeaky(Args, arena, rest, .{
                 .ignore_unknown_fields = true,
                 .allocate = .alloc_always,
-            }) catch return .{ .invalid = "scratch-append needs {\"text\": \"...\"}" };
+            }) catch return .{ .invalid = "this request needs {\"text\": \"...\"}" };
             if (!isText(args.text)) return .{ .invalid = "the text isn't valid UTF-8" };
-            return .{ .scratch_append = args.text };
+            return if (append) .{ .scratch_append = args.text } else .{ .scratch_replace = args.text };
         }
         const bare: ?Request = if (std.mem.eql(u8, word, "status"))
             .status
@@ -79,8 +84,8 @@ pub const Request = union(enum) {
             .status => try w.writeAll("status"),
             .scratch_read => try w.writeAll("scratch-read"),
             .agent_note => try w.writeAll("agent-note"),
-            .scratch_append => |text| {
-                try w.writeAll("scratch-append ");
+            .scratch_append, .scratch_replace => |text| {
+                try w.writeAll(if (self == .scratch_append) "scratch-append " else "scratch-replace ");
                 try std.json.Stringify.value(.{ .text = text }, .{}, w);
             },
             .invalid => unreachable, // only parse makes these
@@ -124,6 +129,7 @@ pub const agent_note =
     \\You're running in a pane of a Roost window. The `roost` command works with the rest of the window:
     \\- `roost scratch read` prints the user's scratchpad: their Markdown notes for this project. Read it when they mention their notes or the scratchpad.
     \\- `roost scratch append` adds the Markdown on its stdin to the end of the scratchpad, as a new paragraph, and never changes what's already there. Use it when the user asks you to put a plan, summary or checklist in their notes, for example `roost scratch append <<'EOF'` … `EOF`.
+    \\- `roost scratch replace` swaps the whole scratchpad for the Markdown on its stdin, and `roost scratch clear` empties it. Use them only when the user asks you to remove, change or tidy something in their notes: read first, change only what they asked for, and keep everything else exactly as it was. One Ctrl+Z in the scratchpad undoes either.
     \\- `roost status` prints this window's project, branch and agent state.
 ;
 
@@ -226,6 +232,10 @@ test "request: words, arguments, and nothing a hook would send" {
     try testing.expect(Request.parse(a, "scratch-append {\"txt\":\"x\"}").? == .invalid);
     try testing.expect(Request.parse(a, "scratch-append not json").? == .invalid);
     try testing.expect(Request.parse(a, "scratch-append {\"text\":\"a\\u0000b\"}").? == .invalid);
+    try testing.expectEqualStrings("new", Request.parse(a, "scratch-replace {\"text\":\"new\"}").?.scratch_replace);
+    // An empty replace is how the Scratchpad gets cleared.
+    try testing.expectEqualStrings("", Request.parse(a, "scratch-replace {\"text\":\"\"}").?.scratch_replace);
+    try testing.expect(Request.parse(a, "scratch-replace").? == .invalid);
     // Hook messages, and anything else, aren't requests.
     inline for (.{ "done", "working", "needs-input", "session", "pane=1 status", "" }) |line| {
         try testing.expectEqual(@as(?Request, null), Request.parse(a, line));
@@ -261,7 +271,7 @@ test "reply: only the field that's set goes on the wire" {
 }
 
 test "agent note: names every command it promises" {
-    inline for (.{ "roost scratch read", "roost scratch append", "roost status" }) |cmd| {
+    inline for (.{ "roost scratch read", "roost scratch append", "roost scratch replace", "roost scratch clear", "roost status" }) |cmd| {
         try testing.expect(std.mem.indexOf(u8, agent_note, cmd) != null);
     }
 }

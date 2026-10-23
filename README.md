@@ -73,8 +73,8 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
   failures to the Agent pane, a passing run to a notification.
 - **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
   `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
-  Agent pane's output back into the Scratchpad. The agent can read your notes
-  and add a plan to them with `roost scratch`. The Scratchpad renders Markdown
+  Agent pane's output back into the Scratchpad. With `roost scratch`, the agent
+  can read your notes, add a plan to them, and tidy them when you ask. The Scratchpad renders Markdown
   live (Typora-style) as you type and autosaves per project.
 - **Inherits your Ghostty config** — fonts, theme, keybinds, and (on Omarchy)
   your current theme are read from your existing `~/.config/ghostty`. A built-in
@@ -160,7 +160,7 @@ it.
 
 ### The agent and your notes
 
-The agent can read your Scratchpad and add to it, from its own pane:
+The agent can read your Scratchpad and change it, from its own pane:
 
 ```sh
 roost scratch read                  # print the Scratchpad's Markdown
@@ -169,11 +169,15 @@ roost scratch append <<'EOF'        # or pipe it in
 ## Plan
 - fix the login bug
 EOF
+roost scratch replace < notes.md    # swap all of it for new Markdown
+roost scratch clear                 # empty it
 ```
 
 An append goes at the end as its own paragraph, and never changes what's
-already there. One `Ctrl+Z` in the Scratchpad takes it back. So you can ask
-Claude to "put the plan in my notes" or "check my notes".
+already there. So you can ask Claude to "put the plan in my notes" or "check
+my notes". Claude replaces or clears only when you ask it to remove or rewrite
+something, and it keeps the rest as it was. One `Ctrl+Z` in the Scratchpad
+undoes any of these.
 
 You don't have to tell Claude about these commands. When a conversation
 starts, the `SessionStart` hook asks the window for a short note on them, and
