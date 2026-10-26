@@ -177,7 +177,9 @@ An append goes at the end as its own paragraph, and never changes what's
 already there. So you can ask Claude to "put the plan in my notes" or "check
 my notes". Claude replaces or clears only when you ask it to remove or rewrite
 something, and it keeps the rest as it was. One `Ctrl+Z` in the Scratchpad
-undoes any of these.
+undoes any of these while the window is open. Before a replace or clear, Roost
+also saves the old notes in `.roost/scratchpad-backups/`, keeping the last 10,
+so they survive a reload or a close.
 
 You don't have to tell Claude about these commands. When a conversation
 starts, the `SessionStart` hook asks the window for a short note on them, and

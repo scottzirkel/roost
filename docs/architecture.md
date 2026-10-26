@@ -83,6 +83,7 @@ touching layout or app code.
 | `src/roost/core/agent_detect.zig` | Agent-state detection from screen and title. |
 | `src/roost/core/hook_msg.zig` | Parses the hook socket's messages. |
 | `src/roost/core/control.zig` | Requests a client sends a window, the replies, and the agent's note on them. |
+| `src/roost/core/backups.zig` | The Scratchpad copies saved before a replace or clear. |
 | `src/roost/core/git_head.zig` | Reads the checked-out branch from `.git/HEAD`, without running git. |
 | `src/roost/core/claude_hooks.zig` | Checks and adds Claude Code hooks in `settings.json`, and tracks which ones run. |
 | `integrations/omarchy/` | The Omarchy bar widget: a QML plugin that reads `roost status --all --watch`. |
@@ -203,6 +204,12 @@ The window replies with one line of JSON and closes.
   makes the change, and sends the whole text back. The agent note says so;
   the window can't tell who asked. A replace loses anything typed between the
   read and the write, and `Ctrl+Z` brings that back too.
+- **A replace saves the old notes to disk first** (`core/backups.zig`), in
+  `<stem>-backups/` next to the notes file, keeping the newest 10. GTK keeps
+  undo history only while the window is open, and autosave writes the new text
+  within a second, so after a reload the copy is the only way back. If the copy
+  can't be written, the replace doesn't happen. The reply names the copy, and
+  the CLI prints it, so the agent can restore it.
 - **A line ends at a newline, or when the client closes.** Requests send a
   newline so they can wait for the answer; `roost-notify` just closes. Reads
   continue until the line is complete, up to 512 KB. Hook lines are still cut

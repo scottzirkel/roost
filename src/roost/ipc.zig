@@ -340,8 +340,18 @@ pub const Server = struct {
             },
             .scratch_replace => |text| {
                 const pad = self.workspace.scratchpad() orelse return no_pad.write(w);
+                // Undo dies with the window, so keep a copy on disk first. No
+                // copy, no replace.
+                const saved = pad.backup(self.alloc) catch |e| {
+                    log.warn("scratchpad backup failed: {}", .{e});
+                    var buf: [128]u8 = undefined;
+                    const why = std.fmt.bufPrint(&buf, "Couldn't back up the notes ({s}), so nothing changed.", .{@errorName(e)}) catch
+                        "Couldn't back up the notes, so nothing changed.";
+                    return (control.Reply{ .@"error" = why }).write(w);
+                };
+                defer if (saved) |p| self.alloc.free(p);
                 pad.replaceAll(text);
-                try (control.Reply{ .ok = true }).write(w);
+                try (control.Reply{ .ok = true, .backup = saved }).write(w);
             },
             .agent_note => try (control.Reply{ .text = control.agent_note }).write(w),
             .invalid => |why| try (control.Reply{ .@"error" = why }).write(w),

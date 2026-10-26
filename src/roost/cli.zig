@@ -37,6 +37,8 @@ const scratch_usage =
     \\  clear    empty the Scratchpad
     \\
     \\One Ctrl+Z in the Scratchpad undoes an append, a replace or a clear.
+    \\A replace or clear also saves the old notes to a backup file first,
+    \\and says where, so they survive a reload.
     \\
 ;
 
@@ -183,6 +185,7 @@ fn scratch(
         err.print("roost scratch: {s}\n", .{why}) catch {};
         return 1;
     }
+    if (r.backup) |p| err.print("roost scratch: saved the old notes to {s}\n", .{p}) catch {};
     if (req == .scratch_read) {
         const text = r.text orelse "";
         out.writeAll(text) catch return 1;
@@ -570,7 +573,10 @@ test "scratch: replace sends the new text, and clear sends none" {
     var err_buf: [512]u8 = undefined;
     var err: std.Io.Writer = .fixed(&err_buf);
     var in: std.Io.Reader = .fixed("## Next\n");
-    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"replace"}, &in, "scratch-replace {\"text\":\"## Next\\n\"}\n", "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"replace"}, &in, "scratch-replace {\"text\":\"## Next\\n\"}\n", "{\"ok\":true,\"backup\":\"/p/old.md\"}\n", &out, &err));
+    try testing.expectEqualStrings("roost scratch: saved the old notes to /p/old.md\n", err.buffered());
+    err.end = 0;
+    // Nothing to back up (an empty Scratchpad), so nothing to say.
     try testing.expectEqual(@as(u8, 0), try scratchAgainst(&.{"clear"}, null, "scratch-replace {\"text\":\"\"}\n", "{\"ok\":true}\n", &out, &err));
     try testing.expectEqualStrings("", err.buffered());
 

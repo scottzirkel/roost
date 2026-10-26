@@ -28,6 +28,7 @@ const gobject = @import("gobject");
 const gdk = @import("gdk");
 
 const md = @import("md.zig");
+const backups = @import("core/backups.zig");
 
 const log = std.log.scoped(.roost_scratch);
 
@@ -247,6 +248,19 @@ pub const ScratchpadPane = struct {
 
         buffer.getEndIter(&end);
         _ = self.text_view.scrollToIter(&end, 0.0, 0, 0.0, 0.0);
+    }
+
+    /// Save the current text as a backup before a replace (see
+    /// `core/backups.zig`). Returns the backup's path, owned by `alloc`, or
+    /// null when there's nothing to keep: the pane is empty, or has no file.
+    pub fn backup(self: *ScratchpadPane, alloc: Allocator) !?[]u8 {
+        const path = self.path orelse return null;
+        const text = self.readText(alloc) orelse return error.OutOfMemory;
+        defer alloc.free(text);
+        if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) return null;
+        const dir = try backups.dirFor(alloc, path);
+        defer alloc.free(dir);
+        return try backups.save(alloc, dir, text, std.time.milliTimestamp());
     }
 
     /// Swap the whole buffer for `bytes` (`roost scratch replace`), ending in

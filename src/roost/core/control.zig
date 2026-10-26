@@ -12,7 +12,7 @@
 //!     status                         ->  {"pid":1234,"project":"/home/me/app","name":"app","branch":"main","state":"needs-input"}
 //!     scratch-read                   ->  {"text":"# Notes\n..."}
 //!     scratch-append {"text":"..."}  ->  {"ok":true}
-//!     scratch-replace {"text":"..."} ->  {"ok":true}
+//!     scratch-replace {"text":"..."} ->  {"ok":true,"backup":"/home/me/app/.roost/scratchpad-backups/..."}
 //!     agent-note                     ->  {"text":"You're running in a pane of a Roost window..."}
 //! A request the window can't carry out gets {"error":"..."}.
 //!
@@ -104,6 +104,8 @@ pub fn isText(bytes: []const u8) bool {
 pub const Reply = struct {
     text: ?[]const u8 = null,
     ok: ?bool = null,
+    /// Where a replace saved the old notes (`core/backups.zig`).
+    backup: ?[]const u8 = null,
     @"error": ?[]const u8 = null,
 
     /// Write the reply line, newline included.
@@ -129,7 +131,7 @@ pub const agent_note =
     \\You're running in a pane of a Roost window. The `roost` command works with the rest of the window:
     \\- `roost scratch read` prints the user's scratchpad: their Markdown notes for this project. Read it when they mention their notes or the scratchpad.
     \\- `roost scratch append` adds the Markdown on its stdin to the end of the scratchpad, as a new paragraph, and never changes what's already there. Use it when the user asks you to put a plan, summary or checklist in their notes, for example `roost scratch append <<'EOF'` … `EOF`.
-    \\- `roost scratch replace` swaps the whole scratchpad for the Markdown on its stdin, and `roost scratch clear` empties it. Use them only when the user asks you to remove, change or tidy something in their notes: read first, change only what they asked for, and keep everything else exactly as it was. One Ctrl+Z in the scratchpad undoes either.
+    \\- `roost scratch replace` swaps the whole scratchpad for the Markdown on its stdin, and `roost scratch clear` empties it. Use them only when the user asks you to remove, change or tidy something in their notes: read first, change only what they asked for, and keep everything else exactly as it was. Both save the old notes to a backup file first and print its path; `roost scratch replace < <that file>` restores them.
     \\- `roost status` prints this window's project, branch and agent state.
 ;
 
