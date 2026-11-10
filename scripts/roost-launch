@@ -28,6 +28,20 @@ bin="$here/../vendor/ghostty/zig-out/bin/roost"
 # src/roost/cli.zig.
 case "${1-}" in
   status|scratch) exec "$bin" "$@" ;;
+  # Help prints and stops. Without this, `roost --help` would open a window
+  # (and the app would read --help as a bad setting) and close the caller.
+  -h|--help|help)
+    cat <<'USAGE'
+usage: roost                 open a Roost window for the current folder
+       roost status ...      show a window's project, branch and agent state
+       roost scratch ...     read or change this window's Scratchpad
+
+Opening a window closes the terminal you ran it from. Other arguments
+are passed to the new window as settings, such as --class=NAME.
+For details, run `roost status --help` or `roost scratch --help`.
+USAGE
+    exit 0
+    ;;
 esac
 
 log="${XDG_STATE_HOME:-$HOME/.local/state}/roost.log"

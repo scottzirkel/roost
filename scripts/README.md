@@ -147,7 +147,8 @@ ln -sfn /path/to/roost/scripts/roost-launch ~/.local/bin/roost
 
 Commands such as `roost status` and `roost scratch` skip all of that: they go straight to the
 binary, open no window and close nothing, so an agent or a desktop bar can run
-them.
+them. `roost --help` (or `-h`, or `help`) prints a short usage message and stops,
+also without opening a window.
 
 Output and startup errors go to `${XDG_STATE_HOME:-~/.local/state}/roost.log`.
 If the binary is missing, the wrapper fails before closing the terminal, so a
