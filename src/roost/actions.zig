@@ -43,6 +43,14 @@ pub const Action = struct {
     on_success: ?Route = null,
     /// Route when the command exits non-zero (overrides `route`).
     on_failure: ?Route = null,
+    /// A service: a command that keeps running, like a dev server. It starts
+    /// with the window (once approved) and restarts if it crashes, instead of
+    /// running once from the menu. Routes don't apply.
+    service: bool = false,
+    /// Whether the action came from the project's `.roost/actions.json`
+    /// rather than your own config. A project's services need your approval
+    /// before they start. Set by `load`, never by the file itself.
+    from_project: bool = false,
 
     /// The route to use for a finished run with exit `code`.
     pub fn routeFor(self: Action, code: u8) Route {
@@ -67,6 +75,9 @@ pub fn load(alloc: Allocator, config_dir: ?[]const u8, project_path: []const u8)
     defer freeActions(alloc, global);
     const repo = readFromDir(alloc, if (project_path.len > 0) project_path else null, ".roost" ++ std.fs.path.sep_str ++ "actions.json");
     defer freeActions(alloc, repo);
+    // Where each came from, whatever the file says about it.
+    for (global) |*a| a.from_project = false;
+    for (repo) |*a| a.from_project = true;
     // `load` owns `global`/`repo` cleanup (the defers above) on every path;
     // `merge` deep-copies into an independently-owned result, so there is no
     // shared ownership to double-free if merge errors mid-way.
@@ -158,6 +169,34 @@ fn freeAction(alloc: Allocator, a: Action) void {
     alloc.free(a.command);
     if (a.cwd) |c| alloc.free(c);
     if (a.icon) |i| alloc.free(i);
+}
+
+/// `all` split into the one-shot actions and the services, each a fresh list
+/// owned by `alloc` (free both with `freeActions`). `all` is left as it was.
+pub fn partition(alloc: Allocator, all: []const Action) !struct { actions: []Action, services: []Action } {
+    var acts: std.ArrayListUnmanaged(Action) = .empty;
+    errdefer {
+        for (acts.items) |a| freeAction(alloc, a);
+        acts.deinit(alloc);
+    }
+    var svcs: std.ArrayListUnmanaged(Action) = .empty;
+    errdefer {
+        for (svcs.items) |a| freeAction(alloc, a);
+        svcs.deinit(alloc);
+    }
+    for (all) |a| {
+        const copy = try dupAction(alloc, a);
+        if (a.service) svcs.append(alloc, copy) catch |e| {
+            freeAction(alloc, copy);
+            return e;
+        } else acts.append(alloc, copy) catch |e| {
+            freeAction(alloc, copy);
+            return e;
+        };
+    }
+    const services = try svcs.toOwnedSlice(alloc);
+    errdefer freeActions(alloc, services);
+    return .{ .actions = try acts.toOwnedSlice(alloc), .services = services };
 }
 
 /// Free a list produced by `load`/`parse`. Safe on an empty (`&.{}`) list.
@@ -275,4 +314,41 @@ test "popupTitle: project prefix, none without a project, overflow drops it" {
     // Nothing fits: still a popup, with a generic title.
     const long_label = "l" ** 70;
     try std.testing.expectEqualStrings("Action", popupTitle(&buf, "roost", long_label, "failed"));
+}
+
+test "load: services, and a project file can't claim to be your own" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("cfg");
+    try tmp.dir.makePath("proj/.roost");
+    try tmp.dir.writeFile(.{ .sub_path = "cfg/actions.json", .data =
+        \\{ "actions": [ { "label": "Notes sync", "command": "sync-notes", "service": true } ] }
+    });
+    try tmp.dir.writeFile(.{ .sub_path = "proj/.roost/actions.json", .data =
+        \\{ "actions": [
+        \\  { "label": "Web", "command": "npm run dev", "service": true, "from_project": false },
+        \\  { "label": "Tests", "command": "npm test" }
+        \\] }
+    });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &buf);
+    const a = std.testing.allocator;
+    const cfg = try std.fs.path.join(a, &.{ root, "cfg" });
+    defer a.free(cfg);
+    const proj = try std.fs.path.join(a, &.{ root, "proj" });
+    defer a.free(proj);
+
+    const all = load(a, cfg, proj);
+    defer freeActions(a, all);
+    try std.testing.expectEqual(@as(usize, 3), all.len);
+    const split = try partition(a, all);
+    defer freeActions(a, split.actions);
+    defer freeActions(a, split.services);
+    try std.testing.expectEqual(@as(usize, 1), split.actions.len);
+    try std.testing.expectEqualStrings("Tests", split.actions[0].label);
+    try std.testing.expectEqual(@as(usize, 2), split.services.len);
+    try std.testing.expectEqualStrings("Notes sync", split.services[0].label);
+    try std.testing.expect(!split.services[0].from_project);
+    try std.testing.expectEqualStrings("Web", split.services[1].label);
+    try std.testing.expect(split.services[1].from_project);
 }

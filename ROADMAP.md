@@ -23,13 +23,6 @@ into the agent. Each new `roost` command gets a line in the agent's note
   then paste it and send Enter, and show in the header that it's waiting.
   Only send Enter when no prompt is showing: an Enter at a permission prompt
   picks "Yes". Never hold your own typing.
-- **Services: actions that keep running.** Mark an action as a service
-  (`"service": true`), such as `npm run dev` or `php artisan queue:listen`. It
-  starts with the window, restarts if it crashes, shows its state in the
-  header, and stops when the window closes. A cloned repo's
-  `.roost/actions.json` could start commands just by opening it. So a service
-  starts on its own only after you approve it, and asks again if its command
-  changes.
 - **Show what each agent is working on.** Claude Code names the task in its
   terminal title, such as "✳ Fix login redirect". Add that title to
   `roost status` and the bar widget's list, so you can tell several windows

@@ -75,6 +75,9 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Wired actions** — define commands like "run the tests" per project, run them
   from the header menu or `Ctrl+Shift+P`, and route the output by result:
   failures to the Agent pane, a passing run to a notification.
+- **Services** — actions that keep running, like a dev server: they start with
+  the window (after your OK, for a project's own), restart if they crash,
+  survive a reload, and log where the agent can read them.
 - **The agent drives the window** — `roost output`, `roost run` and
   `roost open` let the agent read another pane (that dev server error), run
   one of your wired actions and get its exit code, or show you a line of code
@@ -358,6 +361,35 @@ A route is `agent`, `shell`, `scratchpad`, `notify` or `none`. `route` sets the
 default, and `on_success` / `on_failure` override it by exit code. Actions run
 in the background with live output and a Stop button, so a long test suite
 never blocks the window.
+
+### Services
+
+A service is an action that keeps running, such as a dev server. Add
+`"service": true`:
+
+```json
+{ "actions": [
+  { "label": "Comfy Router", "command": "comfy-router --no-browser", "service": true }
+] }
+```
+
+- **It starts with the window,** and stops when the window closes. A service
+  in a project's `.roost/actions.json` waits for your OK the first time, and
+  again whenever its command changes, so opening a cloned repo can't run its
+  commands. Services in your own `~/.config/roost/actions.json` just start.
+- **The header's Services menu** shows each one's state, with Start, Stop,
+  Restart and its live output. It shows "Approve and Start", with the exact
+  command, for one waiting for your OK.
+- **It restarts if it stops on its own,** waiting 1 s, then 2 s, and so on up
+  to a minute while it keeps failing fast. You get a notification if it
+  crashes after running fine.
+- **Stop works like Ctrl+C in a terminal:** it sends SIGINT to everything the
+  service started, so the service's own cleanup runs, then SIGTERM after 5
+  seconds and SIGKILL after 3 more.
+- **It survives a reload.** The reloaded window picks it back up, so a reload
+  doesn't restart your dev server. One you stopped stays stopped.
+- **Its output goes to a log** under `~/.local/state/roost/services/`, so the
+  agent can read it with `roost output "Comfy Router"`.
 
 ## Configuration
 

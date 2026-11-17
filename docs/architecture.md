@@ -73,6 +73,7 @@ touching layout or app code.
 | `src/roost/terminal_pane.zig` | The `TerminalPane` interface and its Ghostty backend. |
 | `src/roost/scratchpad_pane.zig` | The Markdown scratchpad: live styling and autosave. |
 | `src/roost/ipc.zig` | The socket (hook messages and requests) and desktop notifications. |
+| `src/roost/services.zig` | Services: starting, watching and stopping them, picking them up after a reload, and the header's Services menu. |
 | `src/roost/editor_remote.zig` | `roost open`: moves the Editor pane's Neovim through `nvim --server`. |
 | `src/roost/config.zig` | `~/.config/roost/config`, a `key = value` file. |
 | `src/roost/project.zig` | Project resolution, recent projects, and layout files. |
@@ -86,6 +87,7 @@ touching layout or app code.
 | `src/roost/core/control.zig` | Requests a client sends a window, the replies, and the agent's note on them. |
 | `src/roost/core/backups.zig` | The Scratchpad copies saved before a replace or clear. |
 | `src/roost/hypr.zig` | Hyprland: each Roost window's workspace, and the rules and moves that put reopened windows back. |
+| `src/roost/core/services.zig` | Services' approvals, log paths, restart backoff, and what a reload hands over. |
 | `src/roost/core/resume.zig` | Starting an Agent pane with its saved conversation (resume, or ask first), and the list `roost close --all` saves. |
 | `src/roost/core/nvim.zig` | The Editor pane's Neovim: its listen address and the expression that opens a file at a line. |
 | `src/roost/core/git_head.zig` | Reads the checked-out branch from `.git/HEAD`, without running git. |
@@ -380,6 +382,45 @@ the agent while passing tests just notify.
   window. Output streams into a progress view, and a Stop button kills the
   command's process group.
 - Result popups are titled with the project the action ran in.
+
+## Services
+
+Services are wired actions with `"service": true` that keep running
+(`services.zig`, with the portable parts in `core/services.zig`).
+
+- **Where they come from.** `loadActions` splits the actions files into
+  one-shot actions, for the action menu, and services. `actions.load` sets
+  `from_project` on each action from the file it came from, after parsing, so
+  a project's file can't claim to be the user's own.
+- **Approval.** A project's service starts on its own only once approved, for
+  that exact command; approvals live in
+  `~/.config/roost/approved-services.json`. Until then the Services menu
+  shows the command and "Approve and Start". No dialog: one would pop up on
+  whatever the user is typing in.
+- **Starting.** fork and exec, not std's `Child`: the output goes straight to
+  the log file, and the child resets every signal to its default and clears
+  the mask before exec. Ghostty ignores SIGPIPE, and an ignored signal stays
+  ignored through exec, where a shell can't even trap it. The service leads
+  its own process group, so a signal reaches everything it started.
+- **Watching.** A thread per service blocks in `waitpid` and posts the end to
+  the main loop. A service that ends on its own restarts after a backoff
+  (1 s doubling to 60 s, back to 1 s after a run of a minute or more).
+- **Stopping.** SIGINT to the group, like Ctrl+C in a terminal, then SIGTERM
+  after 5 s and SIGKILL after 3 more. Quitting does the same, blocking for up
+  to 7 s before `_exit`, so `roost close --all` waits up to 15 s per window.
+- **Reload.** The log file, not a pipe, is what lets a service outlive a
+  reload: the exec closes every pipe. The service stays our child through the
+  exec (same pid), so the new build waits on it again. `doReload` passes the
+  running services (label, command, pid) and the hand-stopped ones in
+  `ROOST_SERVICES`; startup takes it out of the environment before any pane
+  starts, adopts each pid only if `/proc` says it's our child, and stops one
+  whose definition changed.
+- **Project switch.** The old project's services are stopped and retired, and
+  freed once they exit; the new project's start.
+- **Logs** are `~/.local/state/roost/services/<hash of project>/<label>.log`.
+  A fresh start keeps the last run as `.log.1`; a restart appends after a
+  `--- roost: restarted after exit N ---` line, so a crash stays readable.
+  `roost output <service>` and the menu's Output read the end of it.
 
 ## Scratchpad
 

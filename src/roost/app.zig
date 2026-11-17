@@ -43,6 +43,7 @@ const claude_hooks = @import("core/claude_hooks.zig");
 const control = @import("core/control.zig");
 const resume_core = @import("core/resume.zig");
 const editor_remote = @import("editor_remote.zig");
+const services = @import("services.zig");
 const build_info = @import("build_info.zig");
 
 const log = std.log.scoped(.roost);
@@ -397,6 +398,9 @@ pub fn run() !void {
     defer if (scratch_path) |p| alloc.free(p);
     // After a reload, resume each Agent pane's Claude session (see doReload).
     // Taken out of the environment first, so no pane or new window inherits it.
+    // Services a reload left running: taken out of the environment before
+    // any pane starts, so a pane's shell doesn't inherit them.
+    services.takeHandoff();
     if (std.posix.getenv("ROOST_RESUME_SESSIONS")) |sessions| {
         tree.queueResumes(sessions);
         log.info("resuming agent sessions: {s}", .{sessions});
@@ -520,8 +524,12 @@ pub fn run() !void {
     registerBundledIcons(window);
     // Load the wired actions for this project BEFORE the header bar, which builds
     // the per-action buttons from them.
+    services.init(gapp.as(gio.Application));
     loadActions(&app_ctx);
     installHeaderBar(&app_ctx);
+    // Services a reload left running carry on; the rest that may start do.
+    services.adoptFromEnv();
+    services.startReady();
 
     // 8. Present and focus the first leaf (the default 2x2 makes that the Agent
     //    pane; a restored layout focuses whatever leaf comes first in tree
@@ -712,6 +720,9 @@ fn installHeaderBar(a: *AppContext) void {
     bar.packStart(actions_btn.as(gtk.Widget));
     rebuildActionMenu(a);
 
+    // Services: actions that keep running. Hidden while there are none.
+    bar.packStart(services.headerButton(window.as(gtk.Window)));
+
     // Activity indicator: a spinner + the running action's name, shown only while
     // actions run; click opens the live-output modal. Hidden when nothing runs.
     const activity = gtk.Button.new();
@@ -838,6 +849,8 @@ fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int
     // flag first so the children's exit idles no-op against the torn-down state.)
     stopActiveRuns();
     saveLayout(app_ctx);
+    // Services get Ctrl+C and a few seconds to clean up, like in a terminal.
+    services.stopAllBlocking();
     exitNow(app_ctx);
 }
 
@@ -1070,6 +1083,12 @@ fn doReload(a: *AppContext) void {
         _ = internal_os.setenv("ROOST_RESUME_SESSIONS", z);
         log.info("reload will resume agent sessions: {s}", .{sessions});
     }
+    // Services keep running through the reload; the new build picks them up.
+    if (services.handoff(a.alloc)) |running| {
+        defer a.alloc.free(running);
+        _ = internal_os.setenv("ROOST_SERVICES", running);
+        log.info("reload keeps services running: {s}", .{running});
+    }
     // TERM in-flight action children before the image swap — re-exec keeps our
     // PID and won't signal them, so they'd otherwise run on (the dialog says they
     // end). We do NOT flip `actions_alive` here: reExecSelf returns on failure
@@ -1079,6 +1098,7 @@ fn doReload(a: *AppContext) void {
     reExecSelf(a) catch |err| {
         log.warn("reload failed; staying put err={}", .{err});
         _ = internal_os.unsetenv("ROOST_RESUME_SESSIONS");
+        _ = internal_os.unsetenv("ROOST_SERVICES");
         return;
     };
     // execve does not return on success — anything past here means it failed.
@@ -2221,10 +2241,21 @@ fn onShowHelp(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(
 /// header bar may not exist yet at first call); see `reloadActions`.
 fn loadActions(a: *AppContext) void {
     actions.freeActions(a.alloc, a.actions);
+    a.actions = &.{};
     const cfg_dir = internal_os.xdg.config(a.alloc, .{ .subdir = "roost" }) catch null;
     defer if (cfg_dir) |d| a.alloc.free(d);
-    a.actions = actions.load(a.alloc, cfg_dir, a.current.path);
-    log.info("loaded {d} wired action(s)", .{a.actions.len});
+    const all = actions.load(a.alloc, cfg_dir, a.current.path);
+    defer actions.freeActions(a.alloc, all);
+    // Services keep running instead of running once, so they go to the
+    // Services menu, not the action menu.
+    const split = actions.partition(a.alloc, all) catch {
+        log.warn("out of memory loading actions", .{});
+        return;
+    };
+    defer actions.freeActions(a.alloc, split.services);
+    a.actions = split.actions;
+    services.load(a.current.path, split.services);
+    log.info("loaded {d} wired action(s) and {d} service(s)", .{ a.actions.len, split.services.len });
 }
 
 /// Reload the action list AND rebuild the header dropdown. Used on project switch
@@ -2233,6 +2264,7 @@ fn reloadActions(a: *AppContext) void {
     loadActions(a);
     rebuildActionMenu(a);
     forgetLastRuns();
+    services.startReady();
 }
 
 /// (Re)build the header dropdown's menu from `a.actions` — one item per action,
@@ -2681,6 +2713,11 @@ fn onControlRequest(ctx: *anyopaque, req: control.Request, reply: *ipc.Server.Pe
             reply.finish(.{ .labels = labels.items });
         },
         .run => |r| {
+            if (findAction(a, r.label) == null) if (services.find(r.label)) |svc| {
+                if (r.wait) return reply.finish(.{ .@"error" = "It's a service: it keeps running, so there's no end to wait for. Read it with roost output." });
+                if (services.runFromControl(svc)) |why| return reply.finish(.{ .@"error" = why });
+                return reply.finish(.{ .ok = true });
+            };
             const action = findAction(a, r.label) orelse return finishNoAction(a, r.label, reply);
             if (r.wait) return runAction(a, action, reply);
             runAction(a, action, null);
@@ -2760,6 +2797,21 @@ fn controlOutput(a: *AppContext, o: control.Request.Output, reply: *ipc.Server.P
         };
         defer a.alloc.free(text);
         return reply.finish(.{ .text = control.tailLines(text, o.lines) });
+    }
+
+    // A service: its log.
+    if (services.find(o.target)) |svc| {
+        var arena = std.heap.ArenaAllocator.init(a.alloc);
+        defer arena.deinit();
+        const text = services.logTail(arena.allocator(), svc, run_output_max);
+        if (text.len == 0) {
+            const why = std.fmt.bufPrint(&buf, "\"{s}\" hasn't written anything yet.{s}", .{
+                svc.label,
+                if (svc.state == .needs_approval) " It's waiting for your OK in the window's Services menu." else "",
+            }) catch "That service hasn't written anything yet.";
+            return reply.finish(.{ .@"error" = why });
+        }
+        return reply.finish(.{ .text = control.tailLines(text, o.lines), .running = if (svc.state == .running) true else null });
     }
 
     // An action: one still running wins over its last finished run.

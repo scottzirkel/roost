@@ -505,8 +505,9 @@ fn pidGone(pid: i32) bool {
     return false;
 }
 
-/// How long a window gets to close before it's reported as still open.
-const close_wait_ms = 5000;
+/// How long a window gets to close before it's reported as still open. A
+/// window gives its services up to 7 seconds to stop.
+const close_wait_ms = 15_000;
 
 /// `roost close --all [--yes]`. Asks on `tty` (null when stdin isn't a
 /// terminal, which then needs --yes), saves the projects to `closed_file`,
