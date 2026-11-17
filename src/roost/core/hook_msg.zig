@@ -38,12 +38,18 @@ pub const Event = enum {
     done,
     /// A conversation started or resumed: only `Message.session` matters.
     session,
+    /// Claude's "waiting for your input" reminder, a minute after it
+    /// finished (`notification_type` "idle_prompt"). It's done, not asking
+    /// anything, so it mustn't read as "needs you". An older Roost drops the
+    /// unknown word, which has the same effect.
+    idle,
 
     fn fromToken(tok: []const u8) ?Event {
         if (std.mem.eql(u8, tok, "working")) return .working;
         if (std.mem.eql(u8, tok, "needs-input")) return .needs_input;
         if (std.mem.eql(u8, tok, "done")) return .done;
         if (std.mem.eql(u8, tok, "session")) return .session;
+        if (std.mem.eql(u8, tok, "idle")) return .idle;
         return null;
     }
 };
@@ -130,6 +136,10 @@ test "parse: bare events, with and without a message" {
     const ask = parse("needs-input  Approve this edit?\n").?;
     try testing.expectEqual(Event.needs_input, ask.event);
     try testing.expectEqualStrings("Approve this edit?", ask.text);
+
+    const idle = parse("hook=Notification idle Claude is waiting for your input").?;
+    try testing.expectEqual(Event.idle, idle.event);
+    try testing.expectEqualStrings("Notification", idle.hook);
 }
 
 test "parse: pane prefix names the sender's pane" {

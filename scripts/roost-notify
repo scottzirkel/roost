@@ -9,7 +9,7 @@ remainder is an optional human-readable message:
     roost-notify needs-input "Approve this edit?"
     roost-notify working
 
-Recognized events (anything else is ignored by roost): done | needs-input | working | session
+Recognized events (anything else is ignored by roost): done | needs-input | working | session | idle
 
 `session` comes from Claude Code's SessionStart hook. It tells Roost the
 conversation's session id, so a reload can resume it, and changes no badge.
@@ -114,6 +114,11 @@ def main() -> int:
             payload = {}
     if not message:
         message = str(payload.get("message", "")).strip()
+    # Claude's "waiting for your input" reminder, a minute after it finished,
+    # comes through the same Notification hook as a real question. It isn't
+    # asking anything, so report it as idle: the window stays done, not red.
+    if event == "needs-input" and payload.get("notification_type") == "idle_prompt":
+        event = "idle"
 
     line = event if not message else f"{event} {message}"
     record = True

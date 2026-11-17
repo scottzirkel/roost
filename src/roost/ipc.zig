@@ -64,7 +64,8 @@ fn statusOf(event: hook_msg.Event) ?layout.AgentStatus {
     return switch (event) {
         .working => .working,
         .needs_input => .needs_input,
-        .done => .done,
+        // The idle reminder means it finished: done, whatever it showed.
+        .done, .idle => .done,
         .session => null,
     };
 }
@@ -462,7 +463,8 @@ pub const Server = struct {
         // Notify (+ optional sound) for the attention-worthy events only. An
         // agent in a Shell pane gets no badge, but still gets its popup.
         switch (msg.event) {
-            .working, .session => {},
+            // The Stop hook already said it finished; no second popup.
+            .working, .session, .idle => {},
             .needs_input => {
                 self.notify("Agent needs you", if (rest.len > 0) rest else "Your agent is waiting for input.");
                 self.playSound("message");

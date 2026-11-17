@@ -217,8 +217,15 @@ reading only fills the gaps.
   number.
 - Claude Code hooks run `scripts/roost-notify`, which sends one line:
   `[pane=<id>] [hook=<Event>] [session=<id>] <event> [message]`. Events are
-  `working`, `needs-input`, `done` and `session`, which only records the
-  session; `core/hook_msg.zig` parses them.
+  `working`, `needs-input`, `done`, `session`, which only records the
+  session, and `idle`; `core/hook_msg.zig` parses them.
+- **Claude's idle reminder isn't "needs you".** The Notification hook fires
+  for a question (a permission prompt, `notification_type` `permission_prompt`
+  or `elicitation_dialog`) and also for the "waiting for your input" reminder
+  a minute after a finished turn (`idle_prompt`). roost-notify reports the
+  reminder as `idle`, which shows done and raises no popup, so a finished
+  agent doesn't turn its window, and the bar, red. An older Roost drops the
+  unknown word, with the same result.
   `hook=` names the Claude Code hook that ran, and `session=` the Claude
   session, for reload. Roost exports `ROOST_PROTOCOL=3` to say which fields it
   understands, because an older Roost drops a line with a field it doesn't

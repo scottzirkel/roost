@@ -55,7 +55,10 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
   Agent pane raises a desktop notification + a status badge when the agent
   finishes (`✓ done`) or needs you (`🔔 needs you`). The popup is titled with
   the project — `acme-checkout — Agent needs you` — so with several Roost
-  windows open you know which one is asking without checking each.
+  windows open you know which one is asking without checking each. "Needs
+  you" means Claude is asking something, like a permission prompt; its "still
+  waiting for your input" reminder a minute after it finishes stays `✓ done`.
+  Either clears once the agent starts working again.
 - **Agent state without setup** — when hooks aren't wired (or you're running
   something other than Claude), Roost reads the pane's own screen and terminal
   title to work out whether the agent is `● working`, `🔔 needs you`, `✓ done`,
