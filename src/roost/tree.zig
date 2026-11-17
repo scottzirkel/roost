@@ -604,6 +604,7 @@ pub const Tree = struct {
         var files_arena = std.heap.ArenaAllocator.init(self.alloc);
         defer files_arena.deinit();
         const files_command: ?[:0]const u8 = if (role == .files) self.filesCommand(files_arena.allocator()) else null;
+        if (files_command) |c| log.debug("files pane command: [{s}]", .{c});
         return switch (role) {
             // Agent runs the resolved agent command (e.g. `claude`) if we have
             // one; otherwise it falls back to the user's default shell (null).

@@ -56,6 +56,15 @@ touching layout or app code.
   spawns its child with its own config's `env` entries. Each pane gets a
   private copy of the app config with `ROOST_PANE` added
   (`GhosttyTerminalPane.applyConfig`).
+- **Pane commands are `.direct`, never `.shell`.** Ghostty 1.3.1's termio
+  keeps a `.shell` command string by pointer into the surface's config,
+  which `initSurface` frees when setup ends, while the child spawns later on
+  the IO thread (`execCommand` in `termio/Exec.zig`). When that memory is
+  reused first, the pane runs garbage and shows "Command failed", for example
+  `/bin/sh: $'\226-': command not found`. It's timing, so it struck long
+  commands like the Files pane's most. `.direct` lists are cloned, so
+  `GhosttyTerminalPane.create` turns every `.shell` string into
+  `/bin/sh -c <string>` itself. Recheck when bumping Ghostty.
 - **System libraries.** `build.sh` passes `-fsys=fontconfig`, `freetype`,
   `harfbuzz`, `libpng` and `zlib`. Ghostty otherwise bundles its own copies,
   while GTK loads the system ones; with two copies in one process, a font

@@ -199,8 +199,25 @@ pub const GhosttyTerminalPane = struct {
     pane_id: ?u32,
 
     fn create(opts: StartOptions) GhosttyTerminalPane {
+        // Hand Ghostty a `.direct` command, never `.shell`. Ghostty 1.3.1's
+        // termio (`execCommand` in termio/Exec.zig) keeps a `.shell` string
+        // by pointer, into the surface config that `initSurface` frees as
+        // soon as setup ends, while the child spawns later on the IO thread.
+        // When that memory is reused first, the pane's shell runs garbage
+        // ("/bin/sh: $'\226-': command not found", Command failed). A
+        // `.direct` list is cloned, so wrap the string the same way Ghostty
+        // would: `/bin/sh -c <string>`. The array only has to live until
+        // `Surface.new` clones it, below.
+        var argv: [3][:0]const u8 = undefined;
+        const command: ?configpkg.Command = if (opts.command) |c| switch (c) {
+            .shell => |s| shell: {
+                argv = .{ "/bin/sh", "-c", s };
+                break :shell .{ .direct = &argv };
+            },
+            .direct => c,
+        } else null;
         const surface = Surface.new(.{
-            .command = opts.command,
+            .command = command,
             .working_directory = opts.cwd,
             .title = opts.title,
         });
