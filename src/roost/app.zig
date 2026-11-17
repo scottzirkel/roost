@@ -1286,6 +1286,7 @@ fn setupShortcuts(
 
     // Splits + close.
     addAction(map, "split-h", onSplitH, app_ctx);
+    addAction(map, "toggle-split", onToggleSplit, app_ctx);
     addAction(map, "split-v", onSplitV, app_ctx);
     // Group splits: split the focused pane's whole column/row as a unit.
     addAction(map, "split-group-h", onSplitGroupH, app_ctx);
@@ -1382,6 +1383,9 @@ fn setupShortcuts(
     setAccel2(gtk_app, "win.resize-up", "<Ctrl><Shift>Up", "<Ctrl><Shift>K");
     setAccel2(gtk_app, "win.resize-down", "<Ctrl><Shift>Down", "<Ctrl><Shift>J");
     setAccel(gtk_app, "win.split-h", "<Ctrl><Shift>R");
+    // Flip a pane between beside and below its neighbor (Hyprland's
+    // togglesplit). Ghostty binds it to new_tab, which Roost doesn't use.
+    setAccel(gtk_app, "win.toggle-split", "<Ctrl><Shift>T");
     setAccel(gtk_app, "win.split-v", "<Ctrl><Shift>D");
     setAccel(gtk_app, "win.split-group-h", "<Ctrl><Shift><Alt>R");
     setAccel(gtk_app, "win.split-group-v", "<Ctrl><Shift><Alt>D");
@@ -1507,6 +1511,10 @@ fn onResizeDown(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callcon
 
 // --- Structural handlers ---------------------------------------------------
 
+fn onToggleSplit(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.toggleSplit();
+    saveLayout(a);
+}
 fn onSplitH(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.split(.horizontal);
     saveLayout(a);
@@ -2117,6 +2125,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+←↓↑→  ·  HJKL", .text = "Resize focused pane (push divider)" },
     .{ .text = "Split & arrange" },
     .{ .keys = "Ctrl+Shift+R  /  D", .text = "Split pane → right / down" },
+    .{ .keys = "Ctrl+Shift+T", .text = "Flip a pane between beside and below" },
     .{ .keys = "Ctrl+Shift+Alt+R  /  D", .text = "Split whole column / row as a unit" },
     .{ .keys = "Ctrl+Shift+A S G E N X", .text = "Add Agent / Shell / Git / Editor / Notes / Files" },
     .{ .keys = "Ctrl+W", .text = "Close focused pane" },

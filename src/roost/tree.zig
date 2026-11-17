@@ -874,6 +874,35 @@ pub const Tree = struct {
     /// Swap the focused pane with the pane in `dir` (the same one `moveFocus`
     /// would land on), then keep focus on the moved pane so it travels with you
     /// — exactly like Hyprland's "move window". No-op at an edge.
+    /// Which way to split the focused pane for a new one: beside it when it's
+    /// wider than tall, else below, the way Hyprland's dwindle layout does.
+    pub fn longerSide(self: *Tree) gtk.Orientation {
+        const leaf = self.focused;
+        if (leaf.* != .leaf) return .vertical;
+        const w = leaf.leaf.box.as(gtk.Widget);
+        return if (w.getWidth() > w.getHeight()) .horizontal else .vertical;
+    }
+
+    /// Flip the split holding the focused pane between side by side and one
+    /// above the other, keeping its proportions, like Hyprland's togglesplit.
+    /// No-op for a window with one pane.
+    pub fn toggleSplit(self: *Tree) void {
+        const leaf = self.focused;
+        if (leaf.* != .leaf) return;
+        const parent = parentOf(self.root, leaf) orelse return;
+        const sp = &parent.split;
+        const ratio = currentRatio(sp.paned);
+        const next: gtk.Orientation = if (sp.orientation == .vertical) .horizontal else .vertical;
+        sp.orientation = next;
+        sp.paned.as(gtk.Orientable).setOrientation(next);
+        // The saved ratio was applied once, at creation; set the divider for
+        // the new direction from the split's current size.
+        const w = sp.paned.as(gtk.Widget);
+        const extent = if (next == .horizontal) w.getWidth() else w.getHeight();
+        if (extent > 0) sp.paned.setPosition(@intFromFloat(@round(@as(f64, @floatFromInt(extent)) * ratio)));
+        self.focusNode(leaf);
+    }
+
     pub fn swapFocused(self: *Tree, dir: Direction) void {
         const from = self.focused;
         if (from.* != .leaf) return;

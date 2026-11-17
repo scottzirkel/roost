@@ -291,8 +291,9 @@ Any other bar can run `roost status --all --watch` and read its JSON lines.
 | `Ctrl+Shift+←/→/↑/↓` | Resize the focused pane |
 | `Ctrl+Shift+Alt+←/→/↑/↓` | Swap the focused pane with its neighbor |
 | `Ctrl+Shift+R` / `D` | Split the focused pane right / down |
+| `Ctrl+Shift+T` | Flip the focused pane between beside and below its neighbor |
 | `Ctrl+Shift+Alt+R` / `D` | Split the focused pane's whole column / row |
-| `Ctrl+Shift+A` / `S` / `G` / `E` / `N` / `X` | Add an Agent / Shell / Git / Editor / Scratchpad / Files pane |
+| `Ctrl+Shift+A` / `S` / `G` / `E` / `N` / `X` | Add an Agent / Shell / Git / Editor / Scratchpad / Files pane, beside a wide pane or below a tall one |
 | `Ctrl+W` | Close the focused pane |
 | `Ctrl+Alt+R` | Reset to the default 2×2 layout |
 | `Ctrl+Shift+P` | Run a wired action |

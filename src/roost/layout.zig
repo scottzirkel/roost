@@ -180,15 +180,22 @@ pub const Workspace = struct {
         self.t.resizeFocused(dir);
     }
 
-    /// Add a new pane in the given role by splitting the focused leaf. We split
-    /// vertically (new pane below) by default; the user can re-split as needed.
+    /// Add a new pane in the given role by splitting the focused leaf along its
+    /// longer side: beside a wide pane, below a tall one (Hyprland's dwindle).
+    /// Ctrl+Shift+T flips it after.
     /// "Add a pane by role" reuses the split machinery so the new pane lands in
     /// a real slot in the tree.
     pub fn addRole(self: *Workspace, role: Role) void {
         if (self.window) |w| self.t.syncFocusFromWindow(w);
-        self.t.splitFocused(.vertical, role) catch |err| {
+        self.t.splitFocused(self.t.longerSide(), role) catch |err| {
             log.warn("add-role failed err={}", .{err});
         };
+    }
+
+    /// Flip the focused pane's split between beside and below.
+    pub fn toggleSplit(self: *Workspace) void {
+        if (self.window) |w| self.t.syncFocusFromWindow(w);
+        self.t.toggleSplit();
     }
 
     /// Close the focused leaf, collapsing its sibling up. Returns true if that
