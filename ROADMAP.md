@@ -3,7 +3,7 @@
 What's next for Roost, in order. Finished work lives in the git log, and how
 things work lives in [docs/architecture.md](docs/architecture.md).
 
-Last updated 2026-10-23.
+Last updated 2026-11-17.
 
 ## Now: the control API
 
@@ -14,11 +14,46 @@ and `roost scratch` already use.
 - `roost open path:line` jumps the Editor pane to a file and line.
 - `roost run <action> --wait` runs one of your wired actions and returns its
   exit code. It can only run actions you defined, never arbitrary commands.
+- `roost output <pane or action>` prints the last lines of a pane's screen or
+  of an action's output, such as `roost output shell`. The agent can then read
+  a dev server's error or a failed build without you pasting it in.
 
 The agent learns the commands when its conversation starts, from a note the
 window gives Claude Code's SessionStart hook (`agent_note` in
 `src/roost/core/control.zig`). Each new command gets a line there. The message
 format lives in `src/roost/core/`, so the Mac app can reuse it.
+
+## Next: ideas from Solo
+
+[Solo](https://soloterm.com) is a desktop app that runs coding agents next to
+a project's dev servers. These ideas from it fit Roost's aim of wiring tools
+into the agent.
+
+- **Resume the agent after a quit or a crash.** Reload keeps Claude's
+  conversation, but quitting, crashing or reopening the project starts fresh.
+  Save each Agent pane's session in the project's layout file. On the next
+  open, offer to resume them or start fresh. This matters more while the
+  NVIDIA close crash keeps happening (see Known issues).
+- **Hold text meant for a busy agent.** A failed action types its output into
+  the Agent pane right away, even while Claude shows a permission prompt,
+  where a stray key can pick an answer. Hold the text until the agent is done
+  or idle, and show in the header that it's waiting. Never hold your own
+  typing.
+- **Services: actions that keep running.** Mark an action as a service
+  (`"service": true`), such as `npm run dev` or `php artisan queue:listen`. It
+  starts with the window, restarts if it crashes, shows its state in the
+  header, and stops when the window closes. A cloned repo's
+  `.roost/actions.json` could start commands just by opening it. So a service
+  starts on its own only after you approve it, and asks again if its command
+  changes.
+- **Show what each agent is working on.** Claude Code names the task in its
+  terminal title, such as "✳ Fix login redirect". Add that title to
+  `roost status` and the bar widget's list, so you can tell several windows
+  apart without opening each. Solo asks a model for a summary instead; the
+  title costs nothing.
+- **Suggest actions from the project's scripts.** When a project has no
+  `actions.json`, list the scripts in its `composer.json`, `package.json`,
+  `Makefile` or `justfile` in the action menu, ready to run or save.
 
 ## Later: macOS
 
@@ -62,4 +97,7 @@ This needs a Mac in the loop for building and testing, or a macOS CI runner.
   server that streams terminal cells, while Roost's value is real in-process
   GPU terminals. You can't have both.
 - **Features for several agents in one window.** Roost supports it, but the
-  usual setup is one agent per window, so it isn't a priority.
+  usual setup is one agent per window, so it isn't a priority. That includes
+  Solo's shared to-do lists, locks, and agents that start other agents.
+- **Prompt templates,** as Solo has. Claude Code's own slash commands and
+  skills already cover them.
