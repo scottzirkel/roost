@@ -109,7 +109,8 @@ belongs in `core/`; anything that touches a widget stays outside it.
 ## Panes and layout
 
 - **A binary tree of `GtkPaned` splits.** Each leaf is a role-typed pane: Agent,
-  Shell, Git, Editor or Scratchpad. The default is a 2×2 of Agent, Git, Shell
+  Shell, Git, Editor, Files or Scratchpad. Git runs lazygit and Files runs
+  yazi when they're on PATH, else the shell. The default is a 2×2 of Agent, Git, Shell
   and Scratchpad.
 - **Group splits.** A tree's outer divider is shared by everything on each
   side, so "split this whole column or row" (`Ctrl+Shift+Alt+R`/`D`) is what

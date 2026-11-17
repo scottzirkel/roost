@@ -23,6 +23,11 @@ into the agent. Each new `roost` command gets a line in the agent's note
   then paste it and send Enter, and show in the header that it's waiting.
   Only send Enter when no prompt is showing: an Enter at a permission prompt
   picks "Yes". Never hold your own typing.
+- **Services see your shell's PATH.** A service runs with the window's
+  environment, so a command in a folder your shell's startup files add to
+  PATH, like `~/bin`, isn't found unless you give its full path. Read your
+  login shell's environment once (`$SHELL -lic env`, with a time limit) and
+  start services with it, as Solo does.
 - **Show what each agent is working on.** Claude Code names the task in its
   terminal title, such as "✳ Fix login redirect". Add that title to
   `roost status` and the bar widget's list, so you can tell several windows

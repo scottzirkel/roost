@@ -5,7 +5,7 @@
 //!   Node = Split { orientation, gtk.Paned, two child Nodes }
 //!        | Leaf  { role, Pane, labeled header box }
 //!
-//! A Leaf's Pane is either a Ghostty `TerminalPane` (agent/shell/git/editor) or
+//! A Leaf's Pane is either a Ghostty `TerminalPane` (agent/shell/git/editor/files) or
 //! a `ScratchpadPane` (a GtkTextView). The tree renders into nested
 //! `gtk.Paned`s; the window's child is the root node's widget.
 //!
@@ -71,6 +71,14 @@ fn nextResume() ?[]const u8 {
     return if (hook_msg.validSession(id)) id else null;
 }
 
+/// What the Files pane runs: yazi when it's on PATH, else null for the shell.
+/// Set once at startup (`setFilesCommand`), like the Git pane's lazygit.
+var files_cmd: ?[:0]const u8 = null;
+
+pub fn setFilesCommand(cmd: ?[:0]const u8) void {
+    files_cmd = cmd;
+}
+
 /// Focus-follows-mouse: when on, the pointer entering a pane focuses it (mini-
 /// Hyprland feel). App-wide mode (not per-tree), so a module global; toggled at
 /// runtime. Default on. Read by every leaf's motion controller (`onLeafEnter`).
@@ -120,6 +128,8 @@ pub const Role = enum {
     shell,
     git,
     editor,
+    /// A file manager: yazi, like the Git pane runs lazygit.
+    files,
     scratchpad,
 
     pub fn title(self: Role) [:0]const u8 {
@@ -128,6 +138,7 @@ pub const Role = enum {
             .shell => "Shell",
             .git => "Git",
             .editor => "Editor",
+            .files => "Files",
             .scratchpad => "Scratchpad",
         };
     }
@@ -614,6 +625,12 @@ pub const Tree = struct {
                 // $EDITOR via shell expansion, falling back to nvim then vi.
                 // Neovim also listens, for `roost open`.
                 .command = .{ .shell = editorShellCommand(&cmd_buf, nvim_addr) },
+                .cwd = self.cwd,
+                .title = role.title(),
+                .pane_id = id,
+            }) },
+            .files => .{ .terminal = TerminalPane.initGhostty(.{
+                .command = if (files_cmd) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
                 .pane_id = id,

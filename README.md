@@ -37,9 +37,10 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 
 ## Features
 
-- **Role-typed panes** — Agent, Shell, Git, Editor, and an in-app Markdown
-  Scratchpad. The Agent pane runs `claude` (or `$ROOST_AGENT`, arguments and all
-  — `claude --resume` works); the Git pane runs `lazygit`; each falls back to
+- **Role-typed panes** — Agent, Shell, Git, Editor, Files, and an in-app
+  Markdown Scratchpad. The Agent pane runs `claude` (or `$ROOST_AGENT`,
+  arguments and all — `claude --resume` works); the Git pane runs `lazygit`;
+  the Files pane runs [yazi](https://yazi-rs.github.io); each falls back to
   your shell if the tool isn't installed.
 - **Free-form pane tree** — split any pane, add a pane by role, close, or reset
   to the default 2×2. Not fixed quadrants — arrange it however you like.
@@ -291,7 +292,7 @@ Any other bar can run `roost status --all --watch` and read its JSON lines.
 | `Ctrl+Shift+Alt+←/→/↑/↓` | Swap the focused pane with its neighbor |
 | `Ctrl+Shift+R` / `D` | Split the focused pane right / down |
 | `Ctrl+Shift+Alt+R` / `D` | Split the focused pane's whole column / row |
-| `Ctrl+Shift+A` / `S` / `G` / `E` / `N` | Add an Agent / Shell / Git / Editor / Scratchpad pane |
+| `Ctrl+Shift+A` / `S` / `G` / `E` / `N` / `X` | Add an Agent / Shell / Git / Editor / Scratchpad / Files pane |
 | `Ctrl+W` | Close the focused pane |
 | `Ctrl+Alt+R` | Reset to the default 2×2 layout |
 | `Ctrl+Shift+P` | Run a wired action |
@@ -394,6 +395,9 @@ A service is an action that keeps running, such as a dev server. Add
   it to the first.
 - **Its output goes to a log** under `~/.local/state/roost/services/`, so the
   agent can read it with `roost output "Comfy Router"`.
+- **It runs with the window's environment,** not your shell's startup files.
+  A command your shell finds through a folder it adds to PATH, such as
+  `~/bin`, needs its full path: `/home/you/bin/comfy-router`.
 
 ## Configuration
 

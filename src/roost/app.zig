@@ -322,6 +322,8 @@ pub fn run() !void {
     // 6. Build the role-typed 4-pane workspace. Git pane runs lazygit if it's
     //    on PATH, else the user's shell (so the demo shows no error cards).
     const git_cmd: ?[:0]const u8 = if (lazygitAvailable()) "lazygit" else null;
+    // The Files pane runs yazi, or the shell when it isn't installed.
+    tree.setFilesCommand(if (commandOnPath("yazi")) "yazi" else null);
     if (git_cmd != null) {
         log.info("git pane: lazygit found on PATH", .{});
     } else {
@@ -1211,6 +1213,7 @@ fn onSurfaceCloseRequest(surface: *Surface, data: ?*anyopaque) callconv(.c) void
 //     Ctrl+Shift+S              add Shell
 //     Ctrl+Shift+G              add Git
 //     Ctrl+Shift+E              add Editor
+//     Ctrl+Shift+X              add Files (yazi)
 //     Ctrl+Shift+N              add scratchpad (Notes)
 //
 //   Cross-pane:
@@ -1294,6 +1297,7 @@ fn setupShortcuts(
     addAction(map, "add-shell", onAddShell, app_ctx);
     addAction(map, "add-git", onAddGit, app_ctx);
     addAction(map, "add-editor", onAddEditor, app_ctx);
+    addAction(map, "add-files", onAddFiles, app_ctx);
     addAction(map, "add-scratchpad", onAddScratchpad, app_ctx);
 
     // Reset the whole layout to the default 2x2.
@@ -1386,6 +1390,8 @@ fn setupShortcuts(
     setAccel(gtk_app, "win.add-shell", "<Ctrl><Shift>S");
     setAccel(gtk_app, "win.add-git", "<Ctrl><Shift>G");
     setAccel(gtk_app, "win.add-editor", "<Ctrl><Shift>E");
+    // X for eXplorer: Ghostty has Ctrl+Shift+F for search.
+    setAccel(gtk_app, "win.add-files", "<Ctrl><Shift>X");
     setAccel(gtk_app, "win.add-scratchpad", "<Ctrl><Shift>N");
     setAccel(gtk_app, "win.reset-layout", "<Ctrl><Alt>r");
     setAccel(gtk_app, "app.present-chooser", "<Ctrl>o");
@@ -1611,6 +1617,10 @@ fn onAddGit(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c
 }
 fn onAddEditor(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
     a.workspace.addRole(.editor);
+    saveLayout(a);
+}
+fn onAddFiles(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    a.workspace.addRole(.files);
     saveLayout(a);
 }
 fn onAddScratchpad(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
@@ -2108,7 +2118,7 @@ const help_rows = [_]HelpRow{
     .{ .text = "Split & arrange" },
     .{ .keys = "Ctrl+Shift+R  /  D", .text = "Split pane → right / down" },
     .{ .keys = "Ctrl+Shift+Alt+R  /  D", .text = "Split whole column / row as a unit" },
-    .{ .keys = "Ctrl+Shift+A S G E N", .text = "Add Agent / Shell / Git / Editor / Notes" },
+    .{ .keys = "Ctrl+Shift+A S G E N X", .text = "Add Agent / Shell / Git / Editor / Notes / Files" },
     .{ .keys = "Ctrl+W", .text = "Close focused pane" },
     .{ .keys = "Ctrl+Alt+R", .text = "Reset layout to default 2×2" },
     .{ .text = "Project & worktree" },
@@ -2835,7 +2845,7 @@ fn controlOutput(a: *AppContext, o: control.Request.Output, reply: *ipc.Server.P
     }
     var msg: std.Io.Writer.Allocating = .init(a.alloc);
     defer msg.deinit();
-    msg.writer.print("There's no pane or action named \"{s}\". Name a pane (agent, shell, git, editor), give its number (1 to {d}), or name an action", .{ o.target, a.workspace.paneCount() }) catch {};
+    msg.writer.print("There's no pane or action named \"{s}\". Name a pane (agent, shell, git, editor, files), give its number (1 to {d}), or name an action", .{ o.target, a.workspace.paneCount() }) catch {};
     for (a.actions, 0..) |act, i| msg.writer.print("{s}\"{s}\"", .{ if (i == 0) ": " else ", ", act.label }) catch {};
     msg.writer.writeAll(".") catch {};
     reply.finish(.{ .@"error" = msg.written() });

@@ -56,7 +56,7 @@ const output_usage =
     \\Prints the end of a pane's screen, or of a wired action's output, from
     \\the Roost window this pane is in.
     \\
-    \\  <pane>    agent, shell, git or editor: the first pane of that kind.
+    \\  <pane>    agent, shell, git, editor or files: the first of that kind.
     \\            Or a pane's number, counted like Alt+1...9.
     \\  <action>  a wired action's label, such as "Run tests": its latest run
     \\  -n LINES  how many lines from the end (default 50)
