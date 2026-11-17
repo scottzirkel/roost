@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Roost app icon (dev.scottzirkel.Roost) into the user's hicolor
-# icon theme so the launcher, taskbar, Alt-Tab, and notification fallback render
+# icon theme so the launcher, taskbar and Alt-Tab render
 # the Roost logo instead of a generic icon.
 #
 # The canonical SVG is the square variant of the official Roost logo (full color,

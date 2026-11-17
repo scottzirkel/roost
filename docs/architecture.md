@@ -168,11 +168,11 @@ reading only fills the gaps.
 - `needs-input` and `done` raise a desktop notification titled with the
   project, such as "roost — Agent needs you". An optional sound plays through
   `canberra-gtk-play`, since gio notifications are silent.
-- The popup's icon is the Claude logo (`claude-desktop`, installed by the
-  Claude Desktop package) when the icon theme has it, else the Roost logo.
-  Roost checks the theme itself, because gio sends the daemon only the first
-  name of an icon, so a fallback name never arrives. A missing icon shows as a
-  "?" tile in the Omarchy shell.
+- Agent popups show the Claude logo (`src/roost/icons/notify/claude.png`),
+  and Roost's own popups (action results, hook warnings) show the Roost logo.
+  Roost sends each as a file path in the clone, not an icon-theme name, so
+  they don't depend on another app installing its icon. A popup whose icon
+  the daemon can't find shows as a "?" tile in the Omarchy shell.
 - Once a pane reports through a hook, Roost stops reading its screen for good.
   That's why the `working` hooks matter: without them a pane stays on ✓ through
   its next run.

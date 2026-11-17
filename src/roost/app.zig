@@ -142,7 +142,7 @@ var activity_modal: ?*Activity = null;
 
 /// Our dedicated GTK application id — the single source of truth for the
 /// in-process `--class` injection below. The desktop file's StartupWMClass and
-/// the notification ThemedIcon (ipc.zig) must match this exact string.
+/// the hicolor icon name (`scripts/install-icon.sh`) must match this exact string.
 const app_id = "dev.scottzirkel.Roost";
 
 /// Standard content width for our AdwAlertDialog modals. AlertDialog otherwise
@@ -171,7 +171,7 @@ const standard_modal_width: c_int = 600;
 ///   - `--desktop-notifications=false`: suppress Ghostty's OSC 9 / OSC 777
 ///     desktop notifications. The agent (`claude`) emits such an escape on a
 ///     Stop/needs-input event AND our `roost-notify` Claude Code hook fires a
-///     richer `gio.Notification` (custom title/body + themed icon, plus the
+///     richer `gio.Notification` (custom title/body + the agent's logo, plus the
 ///     Agent-pane status badge) over `ROOST_SOCK`. Without this, an event pops
 ///     TWO native notifications; we keep Roost's and drop Ghostty's. The core
 ///     Surface honors this flag and drops the OSC before it reaches the apprt
@@ -2338,7 +2338,7 @@ fn routeFinished(ar: *ActionRun) void {
             // Body omits the numeric exit code: "exit code 0" reads as failure to
             // anyone who associates 0 with false; the verdict word carries it.
             const body: []const u8 = if (ar.failed_to_run) "could not run command" else "";
-            ipc.notifyApp(gapp.as(gio.Application), "roost-action", title, body);
+            ipc.notifyApp(gapp.as(gio.Application), "roost-action", .roost, title, body);
         },
         .agent, .shell, .scratchpad => |r| {
             const role: tree.Role = switch (r) {
