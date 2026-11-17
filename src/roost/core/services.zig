@@ -156,6 +156,51 @@ pub const Handoff = struct {
     }
 };
 
+/// Kept next to a running service's log, so a window that opens after a
+/// crash finds the copy the crashed window left running instead of starting
+/// a second one on the same ports.
+pub const PidFile = struct {
+    pid: i32,
+    /// The process's start time from `/proc/<pid>/stat`, so a reused pid
+    /// doesn't pass for the service.
+    start_time: u64,
+    /// The window that started or adopted it.
+    owner: i32,
+    command: []const u8,
+
+    pub fn write(self: PidFile, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try std.json.Stringify.value(self, .{}, w);
+        try w.writeByte('\n');
+    }
+
+    pub fn parse(arena: Allocator, text: []const u8) ?PidFile {
+        return std.json.parseFromSliceLeaky(PidFile, arena, text, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch null;
+    }
+};
+
+/// The pid file for the log at `log_path`: `<label>.pid` beside `<label>.log`.
+pub fn pidPath(arena: Allocator, log_path: []const u8) ?[]const u8 {
+    const stem = if (std.mem.endsWith(u8, log_path, ".log")) log_path[0 .. log_path.len - 4] else log_path;
+    return std.fmt.allocPrint(arena, "{s}.pid", .{stem}) catch null;
+}
+
+/// Field 22 of `/proc/<pid>/stat`, the start time, from the file's text.
+/// The command name (field 2) may hold spaces and parens, so count from the
+/// last ')'.
+pub fn statStartTime(stat: []const u8) ?u64 {
+    const close = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
+    var fields = std.mem.tokenizeScalar(u8, stat[close + 1 ..], ' ');
+    // After ')': field 3 (state) is the first; start time is field 22.
+    var i: usize = 3;
+    while (fields.next()) |f| : (i += 1) {
+        if (i == 22) return std.fmt.parseInt(u64, f, 10) catch null;
+    }
+    return null;
+}
+
 /// The last `max` bytes of the file at `path`, starting on a line when it
 /// can. Empty when there's no file. Lives in `arena`.
 pub fn tailFile(arena: Allocator, path: []const u8, max: usize) []const u8 {
@@ -246,6 +291,25 @@ test "handoff: round-trips, and a bad one is empty" {
     try testing.expectEqualStrings("Web \"dev\"", back.services[0].label);
     try testing.expectEqual(@as(i32, 4242), back.services[0].pid);
     try testing.expectEqual(@as(usize, 0), Handoff.parse(a, "garbage").services.len);
+}
+
+test "pid file: round-trips, sits beside the log, and reads a start time" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try (PidFile{ .pid = 42, .start_time = 9001, .owner = 7, .command = "comfy-router --no-browser" }).write(&w);
+    const back = PidFile.parse(a, w.buffered()).?;
+    try testing.expectEqual(@as(i32, 42), back.pid);
+    try testing.expectEqual(@as(u64, 9001), back.start_time);
+    try testing.expectEqualStrings("comfy-router --no-browser", back.command);
+    try testing.expectEqual(@as(?PidFile, null), PidFile.parse(a, "{}"));
+    try testing.expectEqualStrings("/s/web.pid", pidPath(a, "/s/web.log").?);
+    // A real line's shape, with a command name holding a space and a paren.
+    const stat = "4242 (sh (x) y) S 1 4242 4242 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 123456 2338816 1";
+    try testing.expectEqual(@as(?u64, 123456), statStartTime(stat));
+    try testing.expectEqual(@as(?u64, null), statStartTime("4242 (sh) S 1"));
 }
 
 test "tailFile: the end of the file, from a line start" {

@@ -415,6 +415,16 @@ Services are wired actions with `"service": true` that keep running
   `ROOST_SERVICES`; startup takes it out of the environment before any pane
   starts, adopts each pid only if `/proc` says it's our child, and stops one
   whose definition changed.
+- **One copy at a time.** A crash or a kill doesn't stop services: they're in
+  their own process group, not on the window's terminals. So each running
+  service has a pid file beside its log: pid, start time from `/proc`, the
+  owning window's pid, and the command. Before starting a service, a window
+  reads it. A live process with the same start time (so not a reused pid)
+  whose owner window is gone is taken over: the window watches it by polling,
+  since it's no longer our child, and can still signal its group. If the
+  owner is a live Roost window (its socket answers), this window leaves the
+  service to it. A copy running an old command is stopped, and the new one
+  started.
 - **Project switch.** The old project's services are stopped and retired, and
   freed once they exit; the new project's start.
 - **Logs** are `~/.local/state/roost/services/<hash of project>/<label>.log`.

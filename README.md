@@ -388,6 +388,10 @@ A service is an action that keeps running, such as a dev server. Add
   seconds and SIGKILL after 3 more.
 - **It survives a reload.** The reloaded window picks it back up, so a reload
   doesn't restart your dev server. One you stopped stays stopped.
+- **One copy at a time.** If Roost crashes, the service keeps running, and
+  the window takes it over when you reopen the project instead of starting a
+  second copy on the same ports. A second window on the same project leaves
+  it to the first.
 - **Its output goes to a log** under `~/.local/state/roost/services/`, so the
   agent can read it with `roost output "Comfy Router"`.
 

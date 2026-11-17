@@ -272,12 +272,95 @@ pub fn adoptFromEnv() void {
     refresh();
 }
 
-/// Start every service that may start and isn't running.
+/// Start every service that may start and isn't running, unless a copy is
+/// already running: one a crashed window left, which this window takes
+/// over, or one another window runs.
 pub fn startReady() void {
     for (list.items) |svc| {
-        if (!svc.retired and !svc.held and svc.state == .stopped and std.mem.eql(u8, svc.project, current_project)) start(svc, true);
+        if (svc.retired or svc.held or svc.state != .stopped or !std.mem.eql(u8, svc.project, current_project)) continue;
+        if (takeOverLeftover(svc)) continue;
+        start(svc, true);
     }
     refresh();
+}
+
+/// Look for a running copy of `svc` from its pid file. A copy whose window
+/// is gone (a crash) is adopted; one another live window runs is left to
+/// it; one running an old command is stopped. True when `svc` must not be
+/// started now.
+fn takeOverLeftover(svc: *Service) bool {
+    var arena: std.heap.ArenaAllocator = .init(ca);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = core.pidPath(ar, svc.log_path) orelse return false;
+    const text = std.fs.cwd().readFileAlloc(ar, path, 64 * 1024) catch return false;
+    const pf = core.PidFile.parse(ar, text) orelse return false;
+    if (pf.pid <= 0 or !alive(pf.pid) or startTime(pf.pid) != pf.start_time) {
+        std.fs.deleteFileAbsolute(path) catch {};
+        return false;
+    }
+    if (pf.owner != linux.getpid() and isRoostWindow(pf.owner)) {
+        log.info("service '{s}' runs in Roost window {d}; not starting a second copy", .{ svc.label, pf.owner });
+        setLastEnd(svc, "running in another Roost window");
+        svc.held = true;
+        return true;
+    }
+    if (!std.mem.eql(u8, pf.command, svc.command)) {
+        log.info("service '{s}': stopping a copy running an old command (pid {d})", .{ svc.label, pf.pid });
+        const orphan = create(svc.project, .{ .label = svc.label, .command = pf.command }, .running) orelse return false;
+        orphan.pid = pf.pid;
+        list.append(ca, orphan) catch {
+            destroy(orphan);
+            return false;
+        };
+        watch(pf.pid);
+        retire(orphan);
+        return false;
+    }
+    svc.pid = pf.pid;
+    svc.state = .running;
+    svc.started_ms = nowMs();
+    watch(pf.pid);
+    writePidFile(svc);
+    log.info("service '{s}': took over the copy a closed window left running (pid {d})", .{ svc.label, pf.pid });
+    return true;
+}
+
+/// Whether `pid` is a running Roost window: it answers on its socket file.
+fn isRoostWindow(pid: i32) bool {
+    if (pid <= 0 or !alive(pid)) return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+    const sock = std.fmt.bufPrint(&buf, "{s}/roost-{d}.sock", .{ dir, pid }) catch return false;
+    std.fs.accessAbsolute(sock, .{}) catch return false;
+    return true;
+}
+
+/// The start time of `pid` from `/proc`, or 0 when it can't be read.
+fn startTime(pid: i32) u64 {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return 0;
+    var buf: [1024]u8 = undefined;
+    const stat = std.fs.cwd().readFile(path, &buf) catch return 0;
+    return core.statStartTime(stat) orelse 0;
+}
+
+/// Record the running `svc` in its pid file, owned by this window.
+fn writePidFile(svc: *Service) void {
+    var arena: std.heap.ArenaAllocator = .init(ca);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = core.pidPath(ar, svc.log_path) orelse return;
+    var text: std.Io.Writer.Allocating = .init(ar);
+    (core.PidFile{ .pid = svc.pid, .start_time = startTime(svc.pid), .owner = linux.getpid(), .command = svc.command }).write(&text.writer) catch return;
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = text.written() }) catch |e| log.warn("couldn't write {s}: {}", .{ path, e });
+}
+
+fn removePidFile(svc: *Service) void {
+    var arena: std.heap.ArenaAllocator = .init(ca);
+    defer arena.deinit();
+    const path = core.pidPath(arena.allocator(), svc.log_path) orelse return;
+    std.fs.deleteFileAbsolute(path) catch {};
 }
 
 /// What a reload hands the new build: the running services, as JSON for
@@ -391,6 +474,7 @@ fn spawn(svc: *Service, fresh: bool) !void {
     // Both sides set the group, so a signal sent right away still reaches it.
     _ = linux.setpgid(pid, pid);
     svc.pid = pid;
+    writePidFile(svc);
     watch(pid);
 }
 
@@ -432,6 +516,7 @@ fn onEnded(data: ?*anyopaque) callconv(.c) c_int {
     } else return 0;
 
     svc.pid = 0;
+    if (!svc.retired) removePidFile(svc);
     if (svc.escalate_source != 0) {
         _ = glib.Source.remove(svc.escalate_source);
         svc.escalate_source = 0;
@@ -740,7 +825,9 @@ fn popdown() void {
 fn onStart(_: *gtk.Button, svc: *Service) callconv(.c) void {
     popdown();
     svc.backoff_ms = 0;
-    start(svc, true);
+    svc.last_end_len = 0;
+    if (!takeOverLeftover(svc)) start(svc, true);
+    refresh();
 }
 
 fn onStop(_: *gtk.Button, svc: *Service) callconv(.c) void {
