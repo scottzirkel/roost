@@ -109,7 +109,10 @@ A good isolated instance:
   it would close the user's windows too. Set `XDG_RUNTIME_DIR` to a short
   private folder (mode 700; socket paths max out at 108 bytes) and
   `WAYLAND_DISPLAY` to the compositor's socket by absolute path, such as
-  `/run/user/1000/wayland-1`, for the test windows and the CLI alike. For
+  `/run/user/1000/wayland-1`, for the test windows and the CLI alike. Link
+  `<private folder>/hypr` to the real `$XDG_RUNTIME_DIR/hypr`, so `hyprctl`
+  still reaches Hyprland. To test workspaces without touching visible ones,
+  spread the test windows over special workspaces. For
   windows that `roost reopen` starts, which outlive one `dbus-run-session`,
   start the private bus yourself: `dbus-daemon
   --config-file=scripts/test-session-bus.conf --fork --print-address=1

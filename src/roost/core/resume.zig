@@ -38,22 +38,38 @@ pub fn command(buf: []u8, cmd: []const u8, session: []const u8, mode: Mode) ?[:0
     };
 }
 
-/// The windows `roost close --all` closed: their project directories, in
-/// the order `roost status --all` listed them.
+/// The windows `roost close --all` closed, in the order `roost status --all`
+/// listed them.
 pub const Closed = struct {
-    projects: []const []const u8 = &.{},
+    windows: []const Window = &.{},
+
+    pub const Window = struct {
+        project: []const u8,
+        /// Where the window was, for the desktop to put it back: a Hyprland
+        /// workspace spec ("3", "name:notes"), or "" when unknown.
+        workspace: []const u8 = "",
+    };
 
     pub fn write(self: Closed, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try std.json.Stringify.value(self, .{}, w);
         try w.writeByte('\n');
     }
 
-    /// Parse the file's text. Allocations live in `arena`.
+    /// Parse the file's text. Allocations live in `arena`. Also reads the
+    /// first format, a bare `projects` list.
     pub fn parse(arena: Allocator, text: []const u8) !Closed {
-        return std.json.parseFromSliceLeaky(Closed, arena, text, .{
+        const File = struct {
+            windows: []const Window = &.{},
+            projects: []const []const u8 = &.{},
+        };
+        const f = try std.json.parseFromSliceLeaky(File, arena, text, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
+        if (f.windows.len > 0 or f.projects.len == 0) return .{ .windows = f.windows };
+        const list = try arena.alloc(Window, f.projects.len);
+        for (f.projects, list) |p, *w| w.* = .{ .project = p };
+        return .{ .windows = list };
     }
 };
 
@@ -104,19 +120,23 @@ test "command: the question runs in a real shell" {
     }
 }
 
-test "closed: round-trips, and tolerates newer fields" {
+test "closed: round-trips, reads the first format, and tolerates newer fields" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try (Closed{ .projects = &.{ "/home/me/app", "/home/me/my \"site\"" } }).write(&w);
+    try (Closed{ .windows = &.{ .{ .project = "/home/me/app", .workspace = "3" }, .{ .project = "/home/me/my \"site\"" } } }).write(&w);
     const back = try Closed.parse(a, w.buffered());
-    try testing.expectEqual(@as(usize, 2), back.projects.len);
-    try testing.expectEqualStrings("/home/me/my \"site\"", back.projects[1]);
-    const newer = try Closed.parse(a, "{\"projects\":[\"/p\"],\"workspaces\":[3]}");
-    try testing.expectEqualStrings("/p", newer.projects[0]);
-    try testing.expectEqual(@as(usize, 0), (try Closed.parse(a, "{}")).projects.len);
+    try testing.expectEqual(@as(usize, 2), back.windows.len);
+    try testing.expectEqualStrings("3", back.windows[0].workspace);
+    try testing.expectEqualStrings("/home/me/my \"site\"", back.windows[1].project);
+    try testing.expectEqualStrings("", back.windows[1].workspace);
+    const first = try Closed.parse(a, "{\"projects\":[\"/p\",\"/q\"]}");
+    try testing.expectEqualStrings("/q", first.windows[1].project);
+    const newer = try Closed.parse(a, "{\"windows\":[{\"project\":\"/p\",\"monitor\":\"DP-1\"}],\"version\":2}");
+    try testing.expectEqualStrings("/p", newer.windows[0].project);
+    try testing.expectEqual(@as(usize, 0), (try Closed.parse(a, "{}")).windows.len);
 }
 
 test "closedPath: XDG_STATE_HOME, else ~/.local/state" {

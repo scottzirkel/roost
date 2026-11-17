@@ -28,6 +28,7 @@ const std = @import("std");
 const posix = std.posix;
 const control = @import("core/control.zig");
 const resume_core = @import("core/resume.zig");
+const hypr = @import("hypr.zig");
 
 const scratch_usage =
     \\usage: roost scratch read
@@ -179,9 +180,10 @@ pub fn run(args: []const [:0]const u8) u8 {
         var in_buf: [256]u8 = undefined;
         var in = stdin.reader(&in_buf);
         const tty = if (stdin.isTty()) &in.interface else null;
-        break :code closeAll(a, rest, socketDir(), paneSocket(), closedFile(a), tty, &out.interface, &err.interface, pidGone);
+        const where: ?*const fn (std.mem.Allocator) hypr.Workspaces = if (hypr.available()) hypr.roostWorkspaces else null;
+        break :code closeAll(a, rest, socketDir(), paneSocket(), closedFile(a), tty, &out.interface, &err.interface, pidGone, where);
     } else if (std.mem.eql(u8, cmd, "reopen"))
-        reopen(a, rest, socketDir(), closedFile(a), &out.interface, &err.interface, launchWindow)
+        reopen(a, rest, socketDir(), closedFile(a), &out.interface, &err.interface, launchWindow, if (hypr.available()) hypr_placer else null)
     else
         status(rest, &out.interface, &err.interface);
     out.interface.flush() catch return 1;
@@ -520,6 +522,8 @@ fn closeAll(
     out: *std.Io.Writer,
     err: *std.Io.Writer,
     gone: *const fn (i32) bool,
+    /// Each window's workspace, when the desktop can say (Hyprland).
+    where: ?*const fn (std.mem.Allocator) hypr.Workspaces,
 ) u8 {
     var all = false;
     var yes = false;
@@ -569,9 +573,13 @@ fn closeAll(
     }
 
     // Save the list first: closing our own window ends this process.
-    var projects: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (windows) |w| if (w.project.len > 0) projects.append(a, w.project) catch return 1;
-    if (closed_file) |path| saveClosed(a, path, projects.items) catch |e| {
+    const workspaces: hypr.Workspaces = if (where) |f| f(a) else .empty;
+    var saved: std.ArrayListUnmanaged(resume_core.Closed.Window) = .empty;
+    for (windows) |w| {
+        if (w.project.len == 0) continue;
+        saved.append(a, .{ .project = w.project, .workspace = workspaces.get(w.pid) orelse "" }) catch return 1;
+    }
+    if (closed_file) |path| saveClosed(a, path, saved.items) catch |e| {
         err.print("roost close: couldn't save the list of windows to {s} ({s}), so nothing was closed.\n", .{ path, @errorName(e) }) catch {};
         return 1;
     };
@@ -616,16 +624,27 @@ fn closeOne(a: std.mem.Allocator, dir: []const u8, pid: i32, gone: *const fn (i3
     return gone(pid);
 }
 
-fn saveClosed(a: std.mem.Allocator, path: []const u8, projects: []const []const u8) !void {
+fn saveClosed(a: std.mem.Allocator, path: []const u8, windows: []const resume_core.Closed.Window) !void {
     if (std.fs.path.dirname(path)) |d| try std.fs.cwd().makePath(d);
     var text: std.Io.Writer.Allocating = .init(a);
-    try (resume_core.Closed{ .projects = projects }).write(&text.writer);
+    try (resume_core.Closed{ .windows = windows }).write(&text.writer);
     try std.fs.cwd().writeFile(.{ .sub_path = path, .data = text.written() });
 }
 
+/// Puts reopened windows back where they were. `before` runs ahead of
+/// starting window `i`; `after` runs once all are started.
+const Placer = struct {
+    before: *const fn (a: std.mem.Allocator, i: usize, name: []const u8, workspace: []const u8) void,
+    after: *const fn (a: std.mem.Allocator, dir: []const u8, placed: []const Placed) void,
+};
+
+/// A reopened window with a workspace to go back to.
+const Placed = struct { index: usize, project: []const u8, workspace: []const u8 };
+
 /// `roost reopen`: a window for each project in `closed_file` that doesn't
-/// have one, started by `launch`. The list is removed afterwards, so running
-/// it twice doesn't double up.
+/// have one, started by `launch`, and put back on its workspace by `placer`
+/// when there is one. The list is removed afterwards, so running it twice
+/// doesn't double up.
 fn reopen(
     a: std.mem.Allocator,
     args: []const [:0]const u8,
@@ -634,6 +653,7 @@ fn reopen(
     out: *std.Io.Writer,
     err: *std.Io.Writer,
     launch: *const fn (std.mem.Allocator, []const u8) bool,
+    placer: ?Placer,
 ) u8 {
     if (args.len > 0) {
         if (args.len == 1 and isHelp(args[0])) {
@@ -661,7 +681,9 @@ fn reopen(
     const open_now = collect(a, dir) catch &.{};
     var opened: usize = 0;
     var failed = false;
-    for (list.projects) |project| {
+    var placed: std.ArrayListUnmanaged(Placed) = .empty;
+    for (list.windows, 0..) |win, i| {
+        const project = win.project;
         const name = std.fs.path.basename(project);
         const already = for (open_now) |w| {
             if (std.mem.eql(u8, w.project, project)) break true;
@@ -674,17 +696,71 @@ fn reopen(
             err.print("roost reopen: {s} isn't there anymore, so it's skipped.\n", .{project}) catch {};
             continue;
         }
+        const place = placer != null and win.workspace.len > 0;
+        if (place) placer.?.before(a, i, name, win.workspace);
         if (launch(a, project)) {
             out.print("  Opened {s}.\n", .{name}) catch {};
             opened += 1;
+            if (place) placed.append(a, .{ .index = i, .project = project, .workspace = win.workspace }) catch {};
         } else {
             err.print("roost reopen: couldn't open a window for {s}.\n", .{project}) catch {};
             failed = true;
         }
     }
+    if (placer) |p| if (placed.items.len > 0) {
+        out.flush() catch {};
+        p.after(a, dir, placed.items);
+    };
     if (!failed) std.fs.cwd().deleteFile(path) catch {};
     if (opened == 0 and !failed) out.writeAll("Every window was already open.\n") catch {};
     return if (failed) 1 else 0;
+}
+
+/// Hyprland's placer: a quiet rule per window before it starts, then a move
+/// for any window the rule missed. See `hypr.zig`.
+const hypr_placer: Placer = .{ .before = hyprBefore, .after = hyprAfter };
+
+fn reopenRule(a: std.mem.Allocator, i: usize) []const u8 {
+    return std.fmt.allocPrint(a, "roost-reopen-{d}", .{i}) catch "roost-reopen";
+}
+
+fn hyprBefore(a: std.mem.Allocator, i: usize, name: []const u8, workspace: []const u8) void {
+    const expr = hypr.ruleExpr(a, reopenRule(a, i), name, workspace) orelse return;
+    _ = hypr.eval(a, expr);
+}
+
+/// How long reopened windows get to show up before their rules go.
+const reopen_wait_ms = 15_000;
+
+fn hyprAfter(a: std.mem.Allocator, dir: []const u8, placed: []const Placed) void {
+    // Wait for every placed window to answer, to learn its pid.
+    var pids = a.alloc(i32, placed.len) catch return;
+    @memset(pids, 0);
+    var waited: u32 = 0;
+    while (waited < reopen_wait_ms) : (waited += 250) {
+        const now = collect(a, dir) catch &.{};
+        var missing: usize = 0;
+        for (placed, 0..) |p, k| {
+            if (pids[k] != 0) continue;
+            for (now) |w| if (std.mem.eql(u8, w.project, p.project)) {
+                pids[k] = w.pid;
+            };
+            if (pids[k] == 0) missing += 1;
+        }
+        if (missing == 0) break;
+        std.Thread.sleep(250 * std.time.ns_per_ms);
+    }
+    // Move any the rule missed: a title that didn't match, say.
+    const where = hypr.roostWorkspaces(a);
+    for (placed, pids) |p, pid| {
+        if (pid == 0) continue;
+        const at = where.get(pid) orelse continue;
+        if (std.mem.eql(u8, at, p.workspace)) continue;
+        if (hypr.moveExpr(a, pid, p.workspace)) |expr| _ = hypr.dispatch(a, expr);
+    }
+    for (placed) |p| if (hypr.disableExpr(a, reopenRule(a, p.index))) |expr| {
+        _ = hypr.eval(a, expr);
+    };
 }
 
 /// Start a detached Roost window for `project` that resumes its saved
@@ -1287,6 +1363,13 @@ fn alwaysGone(_: i32) bool {
     return true;
 }
 
+/// Window 11 is on workspace 3; the desktop doesn't know about the rest.
+fn fakeWhere(a: std.mem.Allocator) hypr.Workspaces {
+    var map: hypr.Workspaces = .empty;
+    map.put(a, 11, "3") catch {};
+    return map;
+}
+
 test "close --all: asks, saves the projects, and closes the caller's window last" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1320,12 +1403,12 @@ test "close --all: asks, saves the projects, and closes the caller's window last
     var err: std.Io.Writer = .fixed(&err_buf);
     var tty: std.Io.Reader = .fixed("y\n");
     const own = try std.fs.path.join(a, &.{ dir, "roost-11.sock" });
-    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, dir, own, file, &tty, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, dir, own, file, &tty, &out, &err, alwaysGone, fakeWhere));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Close these windows?") != null);
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Closing 2 Roost windows.") != null);
     try testing.expectEqualStrings("", err.buffered());
     const saved = try std.fs.cwd().readFileAlloc(a, file, 4096);
-    try testing.expectEqualStrings("{\"projects\":[\"/p/app\",\"/p/zed\"]}\n", saved);
+    try testing.expectEqualStrings("{\"windows\":[{\"project\":\"/p/app\",\"workspace\":\"3\"},{\"project\":\"/p/zed\",\"workspace\":\"\"}]}\n", saved);
 }
 
 test "close: needs --all, and --yes when there's no terminal; a no closes nothing" {
@@ -1336,10 +1419,10 @@ test "close: needs --all, and --yes when there's no terminal; a no closes nothin
     var out: std.Io.Writer = .fixed(&out_buf);
     var err_buf: [1024]u8 = undefined;
     var err: std.Io.Writer = .fixed(&err_buf);
-    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{}, "/nonexistent", null, null, null, &out, &err, alwaysGone));
-    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{ "--all", "--force" }, "/nonexistent", null, null, null, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{}, "/nonexistent", null, null, null, &out, &err, alwaysGone, null));
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{ "--all", "--force" }, "/nonexistent", null, null, null, &out, &err, alwaysGone, null));
     // No windows: nothing to ask about.
-    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, "/nonexistent", null, null, null, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, "/nonexistent", null, null, null, &out, &err, alwaysGone, null));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "No Roost windows are running.") != null);
 
     var tmp = testing.tmpDir(.{});
@@ -1353,13 +1436,31 @@ test "close: needs --all, and --yes when there's no terminal; a no closes nothin
     const t = try std.Thread.spawn(.{}, fakeWindowSeq, .{ fd, &[_][2][]const u8{ .{ "status\n", status_reply }, .{ "status\n", status_reply } } });
     defer t.join();
     err.end = 0;
-    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{"--all"}, dir, null, null, null, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{"--all"}, dir, null, null, null, &out, &err, alwaysGone, null));
     try testing.expect(std.mem.indexOf(u8, err.buffered(), "Add --yes") != null);
     out.end = 0;
     var no: std.Io.Reader = .fixed("n\n");
-    try testing.expectEqual(@as(u8, 1), closeAll(a, &.{"--all"}, dir, null, null, &no, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 1), closeAll(a, &.{"--all"}, dir, null, null, &no, &out, &err, alwaysGone, null));
     try testing.expect(std.mem.endsWith(u8, out.buffered(), "Nothing closed.\n"));
 }
+
+var placed_buf: [256]u8 = undefined;
+var placed_log: std.Io.Writer = .fixed(&placed_buf);
+
+const fake_placer: Placer = .{
+    .before = struct {
+        fn f(_: std.mem.Allocator, i: usize, name: []const u8, workspace: []const u8) void {
+            placed_log.print("before {d} {s} {s};", .{ i, name, workspace }) catch {};
+        }
+    }.f,
+    .after = struct {
+        fn f(_: std.mem.Allocator, _: []const u8, placed: []const Placed) void {
+            placed_log.print("after {d}", .{placed.len}) catch {};
+            for (placed) |p| placed_log.print(" {s}@{s}", .{ std.fs.path.basename(p.project), p.workspace }) catch {};
+            placed_log.writeAll(";") catch {};
+        }
+    }.f,
+};
 
 var launched: [4][]const u8 = undefined;
 var launched_count: usize = 0;
@@ -1384,7 +1485,7 @@ test "reopen: opens what isn't open, skips what's gone, then forgets the list" {
     const app = try std.fs.path.join(a, &.{ dir, "app" });
     const site = try std.fs.path.join(a, &.{ dir, "site" });
     const file = try std.fs.path.join(a, &.{ dir, "closed-windows.json" });
-    try saveClosed(a, file, &.{ app, site, "/nonexistent/gone" });
+    try saveClosed(a, file, &.{ .{ .project = app, .workspace = "2" }, .{ .project = site, .workspace = "5" }, .{ .project = "/nonexistent/gone" } });
 
     // `site` already has a window.
     const fd = try listen(try std.fs.path.join(a, &.{ dir, "roost-44.sock" }));
@@ -1398,14 +1499,17 @@ test "reopen: opens what isn't open, skips what's gone, then forgets the list" {
     var err_buf: [512]u8 = undefined;
     var err: std.Io.Writer = .fixed(&err_buf);
     launched_count = 0;
-    try testing.expectEqual(@as(u8, 0), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch));
+    placed_log.end = 0;
+    try testing.expectEqual(@as(u8, 0), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch, fake_placer));
     try testing.expectEqual(@as(usize, 1), launched_count);
+    // Only the window that was opened is placed, on its old workspace.
+    try testing.expectEqualStrings("before 0 app 2;after 1 app@2;", placed_log.buffered());
     try testing.expectEqualStrings(app, launched[0]);
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Opened app.") != null);
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "site is already open.") != null);
     try testing.expect(std.mem.indexOf(u8, err.buffered(), "/nonexistent/gone isn't there anymore") != null);
     // Forgotten, so a second reopen has nothing to do.
     out.end = 0;
-    try testing.expectEqual(@as(u8, 1), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch));
+    try testing.expectEqual(@as(u8, 1), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch, null));
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "Nothing to reopen."));
 }

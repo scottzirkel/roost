@@ -191,8 +191,9 @@ roost reopen           # a window for each, resuming each conversation
 ```
 
 `roost close --all` saves each window's layout and conversations, and the
-list of projects, which survives a reboot. `roost reopen` skips projects that
-already have a window. Add `--yes` to close without asking, for a script or a
+list of projects, which survives a reboot. On Hyprland it notes each window's
+workspace too, and `roost reopen` puts each window back there without taking
+focus. `roost reopen` skips projects that already have a window. Add `--yes` to close without asking, for a script or a
 keybinding.
 
 ### The agent and your notes
