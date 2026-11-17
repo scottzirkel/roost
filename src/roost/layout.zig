@@ -255,6 +255,20 @@ pub const Workspace = struct {
         return self.t.routeToPane(node, bytes);
     }
 
+    /// A pane's text, for `roost output`. See `Tree.paneText`.
+    pub fn paneText(self: *Workspace, alloc: std.mem.Allocator, which: tree.Tree.PaneWhich) ?[]u8 {
+        return self.t.paneText(alloc, which);
+    }
+
+    pub fn paneCount(self: *Workspace) usize {
+        return self.t.paneCount();
+    }
+
+    /// The Editor pane's Neovim, for `roost open`. See `Tree.editorLink`.
+    pub fn editorLink(self: *Workspace) tree.Tree.EditorLink {
+        return self.t.editorLink();
+    }
+
     /// Snapshot the Agent pane's terminal text into the scratchpad. Returns a
     /// status the caller can surface (ok / no agent / no scratchpad / empty).
     pub fn captureAgentToScratchpad(self: *Workspace) tree.Tree.CaptureResult {

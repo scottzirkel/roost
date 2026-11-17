@@ -40,6 +40,8 @@ const actions = @import("actions.zig");
 const ansi = @import("ansi.zig");
 const detect = @import("core/agent_detect.zig");
 const claude_hooks = @import("core/claude_hooks.zig");
+const control = @import("core/control.zig");
+const editor_remote = @import("editor_remote.zig");
 const build_info = @import("build_info.zig");
 
 const log = std.log.scoped(.roost);
@@ -128,6 +130,17 @@ var active_runs: std.ArrayListUnmanaged(*ActionRun) = .empty;
 
 /// Count of runs not yet finished — drives the header activity spinner.
 var running_count: usize = 0;
+
+/// The latest finished run of each action, by label, for `roost output`.
+/// Libc-owned keys and outputs; emptied when a project switch reloads the
+/// actions. Main thread only.
+var last_runs: std.StringHashMapUnmanaged(LastRun) = .empty;
+
+const LastRun = struct { output: []u8, code: u8, stopped: bool };
+
+/// The most of one run's output kept or sent to a client: its end. A test
+/// suite can print far more than an agent will read.
+const run_output_max = 1024 * 1024;
 
 /// The single open Action Output modal, or null when none is showing. Holding
 /// the modal (not just a bool) lets a run that starts later append its own row
@@ -417,6 +430,7 @@ pub fn run() !void {
     // place — so switching projects re-points the notifications with it.
     if (have_server) {
         server.project = &app_ctx.current;
+        server.host = .{ .ctx = &app_ctx, .handle = onControlRequest };
         app_ctx.server = &server;
     }
 
@@ -2005,6 +2019,7 @@ fn loadActions(a: *AppContext) void {
 fn reloadActions(a: *AppContext) void {
     loadActions(a);
     rebuildActionMenu(a);
+    forgetLastRuns();
 }
 
 /// (Re)build the header dropdown's menu from `a.actions` — one item per action,
@@ -2040,7 +2055,7 @@ fn onRunAction(_: *gio.SimpleAction, param: ?*glib.Variant, a: *AppContext) call
     if (idx_i < 0) return;
     const idx: usize = @intCast(idx_i);
     if (idx >= a.actions.len) return;
-    runAction(a, a.actions[idx]);
+    runAction(a, a.actions[idx], null);
 }
 
 /// One live wired-action run. Created on the main thread; the worker thread
@@ -2075,6 +2090,9 @@ const ActionRun = struct {
     /// True when the user hit Stop — the result reports "stopped" (not failed) and
     /// skips routing the partial output to a pane.
     stopped: bool = false,
+    /// A `roost run --wait` client owed the result. When set, the result goes
+    /// to it instead of the action's routes.
+    waiter: ?*ipc.Server.Pending = null,
     // Set by the worker before its final marshal:
     code: u8 = 0,
     failed_to_run: bool = false,
@@ -2109,19 +2127,25 @@ fn actionWantsModal(action: actions.Action) bool {
 /// (for the activity indicator + modal), and run the command on a DETACHED
 /// thread. The worker streams output back so the UI never blocks (a `pub crawl`
 /// would freeze the whole GTK loop otherwise — the #1 gotcha).
-fn runAction(a: *AppContext, action: actions.Action) void {
+///
+/// With a `waiter` (`roost run --wait`), the result goes back to that client
+/// instead of through the routes, and no modal opens for it.
+fn runAction(a: *AppContext, action: actions.Action, waiter: ?*ipc.Server.Pending) void {
     const ca = std.heap.c_allocator;
     const ar = ca.create(ActionRun) catch {
         log.warn("action '{s}': out of memory", .{action.label});
+        if (waiter) |w| w.finish(.{ .@"error" = "Roost ran out of memory." });
         return;
     };
     const label = ca.dupe(u8, action.label) catch {
         ca.destroy(ar);
+        if (waiter) |w| w.finish(.{ .@"error" = "Roost ran out of memory." });
         return;
     };
     const command = ca.dupe(u8, action.command) catch {
         ca.free(label);
         ca.destroy(ar);
+        if (waiter) |w| w.finish(.{ .@"error" = "Roost ran out of memory." });
         return;
     };
     // cwd: explicit override, else the project root, else inherit (null).
@@ -2138,6 +2162,7 @@ fn runAction(a: *AppContext, action: actions.Action) void {
         .route = action.route,
         .on_success = action.on_success,
         .on_failure = action.on_failure,
+        .waiter = waiter,
     };
 
     active_runs.append(ca, ar) catch {};
@@ -2153,7 +2178,7 @@ fn runAction(a: *AppContext, action: actions.Action) void {
         // instead of failing silently behind a transient notification.
         if (activity_modal) |act| {
             addActivityRun(act, ar);
-        } else if (actionWantsModal(action)) {
+        } else if (waiter == null and actionWantsModal(action)) {
             openActivityModal(a, &.{ar});
         }
         finalizeRun(ar); // route the failure + tidy the indicator
@@ -2170,7 +2195,7 @@ fn runAction(a: *AppContext, action: actions.Action) void {
     // re-surfacing runs the user already dismissed.
     if (activity_modal) |act| {
         addActivityRun(act, ar);
-    } else if (actionWantsModal(action)) {
+    } else if (waiter == null and actionWantsModal(action)) {
         openActivityModal(a, &.{ar});
     }
 }
@@ -2300,7 +2325,15 @@ fn finalizeRun(ar: *ActionRun) void {
     ar.done = true;
     if (running_count > 0) running_count -= 1;
     updateActivityIndicator(ar.app_ctx);
-    routeFinished(ar);
+    rememberRun(ar);
+    if (ar.waiter) |w| {
+        ar.waiter = null;
+        w.finish(.{
+            .code = ar.code,
+            .text = tailBytes(ar.output.items, run_output_max),
+            .stopped = if (ar.stopped) true else null,
+        });
+    } else routeFinished(ar);
     // Keep the run alive while a modal is showing it (freed on modal close);
     // otherwise it's now unreachable, so free it.
     if (ar.view == null) {
@@ -2369,9 +2402,12 @@ fn routeFinished(ar: *ActionRun) void {
 }
 
 /// Frame the captured output for a pane route (owned by `alloc`). The agent route
-/// gets a context header + a trailing newline so `claude` receives a submitted
-/// prompt; the scratchpad gets a markdown heading; the shell gets the raw output
-/// (no trailing newline, so the last line isn't auto-executed).
+/// gets a context header. It arrives as a bracketed paste, so its trailing
+/// newline does NOT submit it: Claude Code leaves it in the input box until
+/// you press Enter, and drops it while a permission prompt shows (probed
+/// 2026-11-17; see ROADMAP "Hold text meant for a busy agent"). The scratchpad
+/// gets a markdown heading; the shell gets the raw output (no trailing
+/// newline, so the last line isn't auto-executed).
 fn frameActionOutput(alloc: std.mem.Allocator, ar: *ActionRun, role: tree.Role) ?[]u8 {
     const verdict: []const u8 = if (ar.failed_to_run) "could not run" else if (ar.code == 0) "passed" else "failed";
     const out = ar.output.items;
@@ -2382,7 +2418,149 @@ fn frameActionOutput(alloc: std.mem.Allocator, ar: *ActionRun, role: tree.Role) 
     }) catch null;
 }
 
-/// Remove `ar` from the active-runs registry (by identity). No-op if absent.
+/// The end of `bytes`, at most `max` long, starting on a line when it can.
+fn tailBytes(bytes: []const u8, max: usize) []const u8 {
+    if (bytes.len <= max) return bytes;
+    const cut = bytes[bytes.len - max ..];
+    const nl = std.mem.indexOfScalar(u8, cut, '\n') orelse return cut;
+    return cut[nl + 1 ..];
+}
+
+/// Keep a finished run's output as its action's latest, for `roost output`.
+fn rememberRun(ar: *ActionRun) void {
+    const ca = std.heap.c_allocator;
+    const kept = ca.dupe(u8, tailBytes(ar.output.items, run_output_max)) catch return;
+    const last: LastRun = .{ .output = kept, .code = ar.code, .stopped = ar.stopped };
+    if (last_runs.getPtr(ar.label)) |old| {
+        ca.free(old.output);
+        old.* = last;
+        return;
+    }
+    const key = ca.dupe(u8, ar.label) catch return ca.free(kept);
+    last_runs.put(ca, key, last) catch {
+        ca.free(key);
+        ca.free(kept);
+    };
+}
+
+/// Drop every remembered run: another project's outputs would mislead.
+fn forgetLastRuns() void {
+    const ca = std.heap.c_allocator;
+    var it = last_runs.iterator();
+    while (it.next()) |e| {
+        ca.free(e.key_ptr.*);
+        ca.free(e.value_ptr.output);
+    }
+    last_runs.clearRetainingCapacity();
+}
+
+// --- Control requests (`roost output`, `roost run`, `roost open`) ----------
+
+/// Answer the requests the socket server hands over (see `ipc.Server.Host`).
+/// Every path finishes `reply`, now or when the work ends.
+fn onControlRequest(ctx: *anyopaque, req: control.Request, reply: *ipc.Server.Pending) void {
+    const a: *AppContext = @ptrCast(@alignCast(ctx));
+    switch (req) {
+        .actions => {
+            var labels: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer labels.deinit(a.alloc);
+            for (a.actions) |act| labels.append(a.alloc, act.label) catch {};
+            reply.finish(.{ .labels = labels.items });
+        },
+        .run => |r| {
+            const action = findAction(a, r.label) orelse return finishNoAction(a, r.label, reply);
+            if (r.wait) return runAction(a, action, reply);
+            runAction(a, action, null);
+            reply.finish(.{ .ok = true });
+        },
+        .output => |o| controlOutput(a, o, reply),
+        .open => |o| editor_remote.open(a.alloc, a.workspace.editorLink(), o, reply),
+        else => reply.finish(.{ .@"error" = "This request isn't one the window answers here." }),
+    }
+}
+
+/// The action labeled `label`, ignoring case, since an agent may not match
+/// the user's capitals.
+fn findAction(a: *AppContext, label: []const u8) ?actions.Action {
+    for (a.actions) |act| if (std.mem.eql(u8, act.label, label)) return act;
+    for (a.actions) |act| if (std.ascii.eqlIgnoreCase(act.label, label)) return act;
+    return null;
+}
+
+/// Say there's no such action, and name the ones there are.
+fn finishNoAction(a: *AppContext, label: []const u8, reply: *ipc.Server.Pending) void {
+    if (a.actions.len == 0)
+        return reply.finish(.{ .@"error" = "This window has no wired actions. Define them in .roost/actions.json in the project, or in ~/.config/roost/actions.json." });
+    var msg: std.Io.Writer.Allocating = .init(a.alloc);
+    defer msg.deinit();
+    msg.writer.print("There's no action named \"{s}\". This window's actions: ", .{label}) catch {};
+    for (a.actions, 0..) |act, i| msg.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", act.label }) catch {};
+    msg.writer.writeAll(".") catch {};
+    reply.finish(.{ .@"error" = msg.written() });
+}
+
+/// The pane role a target names, if any. "notes" is the Scratchpad too.
+fn roleNamed(target: []const u8) ?tree.Role {
+    inline for (std.meta.fields(tree.Role)) |f| {
+        if (std.ascii.eqlIgnoreCase(target, f.name)) return @enumFromInt(f.value);
+    }
+    if (std.ascii.eqlIgnoreCase(target, "notes")) return .scratchpad;
+    return null;
+}
+
+/// `roost output`: a pane by number or role, else an action by label, running
+/// or finished.
+fn controlOutput(a: *AppContext, o: control.Request.Output, reply: *ipc.Server.Pending) void {
+    var buf: [256]u8 = undefined;
+    const which: ?tree.Tree.PaneWhich = if (std.fmt.parseInt(usize, o.target, 10)) |n| which: {
+        const count = a.workspace.paneCount();
+        if (n == 0 or n > count) {
+            const why = std.fmt.bufPrint(&buf, "There's no pane {d}. This window has {d}, numbered from 1 like Alt+1...9.", .{ n, count }) catch "There's no pane with that number.";
+            return reply.finish(.{ .@"error" = why });
+        }
+        break :which .{ .index = n - 1 };
+    } else |_| if (roleNamed(o.target)) |role| .{ .role = role } else null;
+
+    if (which) |w| {
+        const text = a.workspace.paneText(a.alloc, w) orelse {
+            const why = switch (w) {
+                .role => |r| std.fmt.bufPrint(&buf, "This window has no {s} pane.", .{r.title()}) catch "This window has no such pane.",
+                .index => "Roost couldn't read that pane.",
+            };
+            return reply.finish(.{ .@"error" = why });
+        };
+        defer a.alloc.free(text);
+        return reply.finish(.{ .text = control.tailLines(text, o.lines) });
+    }
+
+    // An action: one still running wins over its last finished run.
+    for (active_runs.items) |ar| {
+        if (ar.done or !std.ascii.eqlIgnoreCase(ar.label, o.target)) continue;
+        return reply.finish(.{ .text = control.tailLines(ar.output.items, o.lines), .running = true });
+    }
+    var it = last_runs.iterator();
+    while (it.next()) |e| {
+        if (!std.ascii.eqlIgnoreCase(e.key_ptr.*, o.target)) continue;
+        const last = e.value_ptr.*;
+        return reply.finish(.{
+            .text = control.tailLines(last.output, o.lines),
+            .code = last.code,
+            .stopped = if (last.stopped) true else null,
+        });
+    }
+    if (findAction(a, o.target)) |act| {
+        const why = std.fmt.bufPrint(&buf, "\"{s}\" hasn't run in this window yet. Start it with roost run.", .{act.label}) catch "That action hasn't run in this window yet.";
+        return reply.finish(.{ .@"error" = why });
+    }
+    var msg: std.Io.Writer.Allocating = .init(a.alloc);
+    defer msg.deinit();
+    msg.writer.print("There's no pane or action named \"{s}\". Name a pane (agent, shell, git, editor), give its number (1 to {d}), or name an action", .{ o.target, a.workspace.paneCount() }) catch {};
+    for (a.actions, 0..) |act, i| msg.writer.print("{s}\"{s}\"", .{ if (i == 0) ": " else ", ", act.label }) catch {};
+    msg.writer.writeAll(".") catch {};
+    reply.finish(.{ .@"error" = msg.written() });
+}
+
+/// Remove `ar` from the active-runs registry (by identity). No-op if absent./// Remove `ar` from the active-runs registry (by identity). No-op if absent.
 fn removeActiveRun(ar: *ActionRun) void {
     for (active_runs.items, 0..) |x, i| {
         if (x == ar) {
@@ -2792,7 +2970,7 @@ fn onPaletteSearchActivate(_: *gtk.SearchEntry, palette: *Palette) callconv(.c) 
     for (a.actions) |action| {
         if (paletteMatches(q, action.label)) {
             _ = palette.dialog.as(adw.Dialog).close();
-            runAction(a, action);
+            runAction(a, action, null);
             return;
         }
     }
@@ -2804,7 +2982,7 @@ fn onPaletteRowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, palette: *Palett
     const a = palette.a;
     const action = a.actions[@intCast(idx)];
     _ = palette.dialog.as(adw.Dialog).close();
-    runAction(a, action);
+    runAction(a, action, null);
 }
 
 fn onPaletteClosed(_: *adw.Dialog, palette: *Palette) callconv(.c) void {

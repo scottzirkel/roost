@@ -5,29 +5,13 @@ things work lives in [docs/architecture.md](docs/architecture.md).
 
 Last updated 2026-11-17.
 
-## Now: the control API
-
-More `roost` commands that the agent, or you, can run inside a pane to drive
-its window. They build on the socket and message format that `roost status`
-and `roost scratch` already use.
-
-- `roost open path:line` jumps the Editor pane to a file and line.
-- `roost run <action> --wait` runs one of your wired actions and returns its
-  exit code. It can only run actions you defined, never arbitrary commands.
-- `roost output <pane or action>` prints the last lines of a pane's screen or
-  of an action's output, such as `roost output shell`. The agent can then read
-  a dev server's error or a failed build without you pasting it in.
-
-The agent learns the commands when its conversation starts, from a note the
-window gives Claude Code's SessionStart hook (`agent_note` in
-`src/roost/core/control.zig`). Each new command gets a line there. The message
-format lives in `src/roost/core/`, so the Mac app can reuse it.
-
-## Next: ideas from Solo
+## Now: ideas from Solo
 
 [Solo](https://soloterm.com) is a desktop app that runs coding agents next to
 a project's dev servers. These ideas from it fit Roost's aim of wiring tools
-into the agent.
+into the agent. Each new `roost` command gets a line in the agent's note
+(`agent_note` in `src/roost/core/control.zig`), and its message format goes in
+`src/roost/core/`, so the Mac app can reuse it.
 
 - **Resume the agent after a quit or a crash.** Reload keeps Claude's
   conversation, but quitting, crashing or reopening the project starts fresh.
@@ -38,9 +22,12 @@ into the agent.
   the Agent pane right away. If Claude is showing a permission prompt, Claude
   Code throws the paste away, so the failure never reaches the conversation.
   It can't answer the prompt, because Roost pastes with bracketed paste and
-  the prompt ignores pastes (probed with Claude Code on 2026-11-17). Hold the
-  text until the agent is done or idle, and show in the header that it's
-  waiting. Never hold your own typing.
+  the prompt ignores pastes (probed with Claude Code on 2026-11-17). When it
+  does arrive, it sits in Claude's input box unsent, so Claude doesn't start
+  on it until you press Enter. Hold the text until the agent is done or idle,
+  then paste it and send Enter, and show in the header that it's waiting.
+  Only send Enter when no prompt is showing: an Enter at a permission prompt
+  picks "Yes". Never hold your own typing.
 - **Services: actions that keep running.** Mark an action as a service
   (`"service": true`), such as `npm run dev` or `php artisan queue:listen`. It
   starts with the window, restarts if it crashes, shows its state in the

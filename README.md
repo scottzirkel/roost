@@ -71,6 +71,10 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
 - **Wired actions** — define commands like "run the tests" per project, run them
   from the header menu or `Ctrl+Shift+P`, and route the output by result:
   failures to the Agent pane, a passing run to a notification.
+- **The agent drives the window** — `roost output`, `roost run` and
+  `roost open` let the agent read another pane (that dev server error), run
+  one of your wired actions and get its exit code, or show you a line of code
+  in the Editor pane.
 - **Scratchpad ↔ Agent** — select text (or just a line) in the Scratchpad and
   `Ctrl+Enter` sends it straight to the Agent pane; `Ctrl+Shift+Y` captures the
   Agent pane's output back into the Scratchpad. With `roost scratch`, the agent
@@ -184,6 +188,29 @@ so they survive a reload or a close.
 You don't have to tell Claude about these commands. When a conversation
 starts, the `SessionStart` hook asks the window for a short note on them, and
 Claude Code adds that note to the conversation.
+
+### The agent and the rest of the window
+
+The agent, or you, can also read other panes, run your wired actions, and
+point the Editor pane at code:
+
+```sh
+roost output shell             # the end of the Shell pane's screen
+roost output 3 -n 100          # the third pane (counted like Alt+3), last 100 lines
+roost output "Run tests"       # a wired action's latest output
+roost run                      # list this window's wired actions
+roost run "Run tests" --wait   # run one, print its output, exit with its code
+roost open src/app.zig:42      # show line 42 in the Editor pane
+```
+
+So you can ask Claude about "the error in the shell", or to "run the tests
+action". `roost run` only runs actions you defined, never other commands. With
+`--wait`, the output goes to the caller instead of where the action's routes
+send it. Without it, the action runs as if you'd picked it from the menu.
+
+`roost open` needs the Editor pane to run Neovim, which it does when `$EDITOR`
+is `nvim` or unset. Roost starts that Neovim listening on a private socket,
+and moves it there without taking focus from the pane you're typing in.
 
 ### On the Omarchy bar
 
@@ -320,9 +347,9 @@ More in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Roost is **early but usable**, and in daily use. What's next — a Waybar
-indicator, an API that lets the agent drive Roost, and a native macOS version —
-is in [ROADMAP.md](ROADMAP.md).
+Roost is **early but usable**, and in daily use. What's next — resuming the
+agent after a crash, long-running services, and a native macOS version — is
+in [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

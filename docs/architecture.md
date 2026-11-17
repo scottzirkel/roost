@@ -66,13 +66,14 @@ touching layout or app code.
 | File | What it does |
 | --- | --- |
 | `src/main_roost.zig` | Entry point: runs a `roost` command, or starts the window. |
-| `src/roost/cli.zig` | `roost status` and `roost scratch`: find the window's socket, ask, and print. |
+| `src/roost/cli.zig` | The `roost` commands (`status`, `scratch`, `output`, `run`, `open`): find the window's socket, ask, and print. |
 | `src/roost/app.zig` | Startup, the window, the main loop, actions, dialogs, settings, and the wired-actions runner. |
 | `src/roost/tree.zig` | The pane tree: split, add, close, swap, resize, focus, persistence, agent polling. |
 | `src/roost/layout.zig` | `Workspace`, the thin layer between the app and the tree. |
 | `src/roost/terminal_pane.zig` | The `TerminalPane` interface and its Ghostty backend. |
 | `src/roost/scratchpad_pane.zig` | The Markdown scratchpad: live styling and autosave. |
 | `src/roost/ipc.zig` | The socket (hook messages and requests) and desktop notifications. |
+| `src/roost/editor_remote.zig` | `roost open`: moves the Editor pane's Neovim through `nvim --server`. |
 | `src/roost/config.zig` | `~/.config/roost/config`, a `key = value` file. |
 | `src/roost/project.zig` | Project resolution, recent projects, and layout files. |
 | `src/roost/git.zig` | Git helpers for worktrees and branch names. |
@@ -84,6 +85,7 @@ touching layout or app code.
 | `src/roost/core/hook_msg.zig` | Parses the hook socket's messages. |
 | `src/roost/core/control.zig` | Requests a client sends a window, the replies, and the agent's note on them. |
 | `src/roost/core/backups.zig` | The Scratchpad copies saved before a replace or clear. |
+| `src/roost/core/nvim.zig` | The Editor pane's Neovim: its listen address and the expression that opens a file at a line. |
 | `src/roost/core/git_head.zig` | Reads the checked-out branch from `.git/HEAD`, without running git. |
 | `src/roost/core/claude_hooks.zig` | Checks and adds Claude Code hooks in `settings.json`, and tracks which ones run. |
 | `integrations/omarchy/` | The Omarchy bar widget: a QML plugin that reads `roost status --all --watch`. |
@@ -225,6 +227,33 @@ The window replies with one line of JSON and closes.
   newline so they can wait for the answer; `roost-notify` just closes. Reads
   continue until the line is complete, up to 512 KB. Hook lines are still cut
   at 1 KB.
+- **`output`, `actions`, `run` and `open` need more than the workspace,** so
+  the server hands them to a `Host` (`onControlRequest` in `app.zig`) with a
+  `Pending` reply. The host finishes it once, now or later. The connection
+  stays open until then, which is how a waited `run` answers when the action
+  ends and `open` answers when Neovim has moved. The request's strings live
+  only for the call, so the host copies what it keeps.
+- **`output` reads a pane or an action.** A number counts panes in tree
+  order, like Alt+1…9. A role name reads the first pane with that role. Any
+  other word is an action label, matched without case: a running action's
+  output so far, else its last run's. Each action's last output is kept
+  (its last 1 MB), and forgotten when a project switch reloads the actions.
+- **`run` only runs actions,** found by label, never a command. Without
+  `wait` it starts the action like the menu does and answers at once. With
+  `wait`, the result goes back to the caller and the routes are skipped, since
+  the caller is usually the agent the routes would reach. No modal opens for
+  a waited run.
+- **`open` steers Neovim, and only Neovim.** When `$EDITOR` (else `$VISUAL`,
+  else `nvim`) is Neovim, an Editor pane starts it with `--listen
+  $XDG_RUNTIME_DIR/roost-nvim-<pid>-<pane>-<random>`; the random part keeps a
+  reload's new Neovim from meeting the old socket. `open` runs `nvim --server
+  <addr> --remote-expr <expr>`, where the expression is Lua through
+  `luaeval` (`nvim_exec_lua` isn't callable from an expression). It skips
+  `:edit` when the file is already showing, which would refuse a modified
+  buffer. The run is asynchronous with a 5-second limit, so a Neovim stuck on
+  a prompt never blocks the window. It doesn't focus the Editor pane, since
+  you may be typing to the agent. Other editors have no such door, so `open`
+  says it needs Neovim.
 - **The agent learns the commands when its conversation starts.** The
   SessionStart hook runs `roost-notify session`, which asks the window for
   `agent-note` and prints the reply. Claude Code adds a SessionStart hook's

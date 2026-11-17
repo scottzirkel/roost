@@ -9,6 +9,10 @@
 //!     roost scratch append [text]  add to it: the text, or stdin
 //!     roost scratch replace [text] swap all of it for new text
 //!     roost scratch clear          empty it
+//!     roost output <pane|action>   the end of a pane's screen or an action's output
+//!     roost run                    list this window's wired actions
+//!     roost run <action> [--wait]  run one, and with --wait report how it went
+//!     roost open <file>[:line[:col]] show a file in the Editor pane
 //!
 //! It's the same binary that runs the window: `main` offers its argv here
 //! first, and starts the window only when the first word isn't a command.
@@ -42,6 +46,44 @@ const scratch_usage =
     \\
 ;
 
+const output_usage =
+    \\usage: roost output <pane or action> [-n LINES]
+    \\
+    \\Prints the end of a pane's screen, or of a wired action's output, from
+    \\the Roost window this pane is in.
+    \\
+    \\  <pane>    agent, shell, git or editor: the first pane of that kind.
+    \\            Or a pane's number, counted like Alt+1...9.
+    \\  <action>  a wired action's label, such as "Run tests": its latest run
+    \\  -n LINES  how many lines from the end (default 50)
+    \\
+;
+
+const run_usage =
+    \\usage: roost run                     list the window's wired actions
+    \\       roost run <action> [--wait]   run one, by its label
+    \\
+    \\Runs one of the wired actions of the Roost window this pane is in, such
+    \\as "Run tests". It never runs anything that isn't an action.
+    \\
+    \\  --wait  wait for it to finish, print its output, and exit with its
+    \\          exit code. The output comes here instead of going where the
+    \\          action's routes send it.
+    \\
+    \\Without --wait, it starts the action and returns at once, and the output
+    \\goes where the action's routes send it.
+    \\
+;
+
+const open_usage =
+    \\usage: roost open <file>[:<line>[:<column>]]
+    \\
+    \\Shows a file in the Editor pane of the Roost window this pane is in, at
+    \\the line and column if you give them. The Editor pane has to be running
+    \\Neovim.
+    \\
+;
+
 const usage =
     \\usage: roost status [--all] [--json] [--watch]
     \\
@@ -56,6 +98,10 @@ const usage =
 
 /// How long one window gets to answer before it's reported as unknown.
 const answer_timeout_ms = 500;
+/// The same for `roost open`, which waits for Neovim to move.
+const open_timeout_ms = 8000;
+/// No limit: `roost run --wait` waits as long as the action runs.
+const no_timeout = 0;
 /// The same for `roost scratch`, which moves more text and has one window
 /// to wait for.
 const scratch_timeout_ms = 3000;
@@ -76,7 +122,9 @@ pub fn command() ?u8 {
 /// Keep in sync with the list in `scripts/roost-launch`, which passes these
 /// straight through instead of opening a window.
 fn isCommand(word: []const u8) bool {
-    return std.mem.eql(u8, word, "status") or std.mem.eql(u8, word, "scratch");
+    const words = [_][]const u8{ "status", "scratch", "output", "run", "open" };
+    for (words) |w| if (std.mem.eql(u8, word, w)) return true;
+    return false;
 }
 
 /// Run `args` (argv without the program name), printing to stdout and stderr.
@@ -86,15 +134,25 @@ pub fn run(args: []const [:0]const u8) u8 {
     var err_buf: [1024]u8 = undefined;
     var err = std.fs.File.stderr().writer(&err_buf);
     defer err.interface.flush() catch {};
-    const code = if (std.mem.eql(u8, args[0], "scratch")) code: {
-        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-        defer arena.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cmd = args[0];
+    const rest = args[1..];
+    const code = if (std.mem.eql(u8, cmd, "scratch")) code: {
         const stdin = std.fs.File.stdin();
         var in_buf: [4096]u8 = undefined;
         var in = stdin.reader(&in_buf);
         const piped = if (stdin.isTty()) null else &in.interface;
-        break :code scratch(arena.allocator(), args[1..], paneSocket(), piped, &out.interface, &err.interface);
-    } else status(args[1..], &out.interface, &err.interface);
+        break :code scratch(a, rest, paneSocket(), piped, &out.interface, &err.interface);
+    } else if (std.mem.eql(u8, cmd, "output"))
+        output(a, rest, paneSocket(), &out.interface, &err.interface)
+    else if (std.mem.eql(u8, cmd, "run"))
+        runAction(a, rest, paneSocket(), &out.interface, &err.interface)
+    else if (std.mem.eql(u8, cmd, "open"))
+        open(a, rest, paneSocket(), cwdOrRoot(a), &out.interface, &err.interface)
+    else
+        status(rest, &out.interface, &err.interface);
     out.interface.flush() catch return 1;
     return code;
 }
@@ -192,6 +250,215 @@ fn scratch(
         if (text.len > 0 and text[text.len - 1] != '\n') out.writeByte('\n') catch return 1;
     }
     return 0;
+}
+
+/// Send `req` to the window at `sock` and read its reply. Says what went
+/// wrong on `err`, as `roost <name>: ...`, and returns null when there's no
+/// usable reply, including when the window answered with an error.
+fn askWindow(
+    a: std.mem.Allocator,
+    name: []const u8,
+    sock: ?[]const u8,
+    req: control.Request,
+    timeout_ms: u32,
+    err: *std.Io.Writer,
+) ?control.Reply {
+    const path = sock orelse {
+        err.print("roost {s}: not in a Roost pane, so there's no window to ask.\n", .{name}) catch {};
+        return null;
+    };
+    var line: std.Io.Writer.Allocating = .init(a);
+    req.write(&line.writer) catch return null;
+    const raw = ask(a, path, line.written(), timeout_ms) catch |e| switch (e) {
+        error.NoWindow => {
+            err.print("roost {s}: no window answers at {s}\n", .{ name, path }) catch {};
+            return null;
+        },
+        else => "",
+    };
+    const reply_line = std.mem.trim(u8, raw, " \t\r\n");
+    const reply = if (reply_line.len == 0) null else control.Reply.parse(a, reply_line) catch null;
+    const r = reply orelse {
+        if (req == .run and req.run.wait)
+            err.print("roost {s}: the window closed before the action finished, or it's an older Roost build that needs a reload.\n", .{name}) catch {}
+        else
+            err.print("roost {s}: the window didn't answer. If it's an older Roost build, reload it to update.\n", .{name}) catch {};
+        return null;
+    };
+    if (r.@"error") |why| {
+        err.print("roost {s}: {s}\n", .{ name, why }) catch {};
+        return null;
+    }
+    return r;
+}
+
+/// Write `text`, ending it with a newline.
+fn writeLine(out: *std.Io.Writer, text: []const u8) !void {
+    if (text.len == 0) return;
+    try out.writeAll(text);
+    if (text[text.len - 1] != '\n') try out.writeByte('\n');
+}
+
+fn isHelp(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help");
+}
+
+/// `roost output <pane or action> [-n LINES]`. The target's words are joined,
+/// so `roost output Run tests` works without quotes.
+fn output(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    sock: ?[]const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) u8 {
+    var lines: u32 = control.Request.Output.default_lines;
+    var words: std.ArrayListUnmanaged([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelp(arg)) {
+            out.writeAll(output_usage) catch {};
+            return 0;
+        }
+        const value: ?[]const u8 = if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--lines")) v: {
+            i += 1;
+            break :v if (i < args.len) args[i] else "";
+        } else if (std.mem.startsWith(u8, arg, "--lines="))
+            arg["--lines=".len..]
+        else
+            null;
+        if (value) |v| {
+            lines = std.fmt.parseInt(u32, v, 10) catch {
+                err.print("roost output: '{s}' isn't a number of lines.\n\n", .{v}) catch {};
+                err.writeAll(output_usage) catch {};
+                return 2;
+            };
+            continue;
+        }
+        words.append(a, arg) catch return 1;
+    }
+    const target = std.mem.join(a, " ", words.items) catch return 1;
+    if (target.len == 0) {
+        err.writeAll("roost output: say which pane or action.\n\n") catch {};
+        err.writeAll(output_usage) catch {};
+        return 2;
+    }
+    const r = askWindow(a, "output", sock, .{ .output = .{ .target = target, .lines = lines } }, scratch_timeout_ms, err) orelse return 1;
+    if (r.running orelse false)
+        err.print("roost output: \"{s}\" is still running. This is its output so far.\n", .{target}) catch {}
+    else if (r.stopped orelse false)
+        err.print("roost output: \"{s}\" was stopped before it finished.\n", .{target}) catch {}
+    else if (r.code) |c|
+        err.print("roost output: \"{s}\" {s} (exit {d}).\n", .{ target, if (c == 0) "passed" else "failed", c }) catch {};
+    writeLine(out, r.text orelse "") catch return 1;
+    return 0;
+}
+
+/// `roost run [<action> [--wait]]`. With no action, lists them.
+fn runAction(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    sock: ?[]const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) u8 {
+    var wait = false;
+    var words: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (args) |arg| {
+        if (isHelp(arg)) {
+            out.writeAll(run_usage) catch {};
+            return 0;
+        } else if (std.mem.eql(u8, arg, "--wait")) {
+            wait = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            err.print("roost run: unknown option '{s}'\n\n", .{arg}) catch {};
+            err.writeAll(run_usage) catch {};
+            return 2;
+        } else {
+            words.append(a, arg) catch return 1;
+        }
+    }
+    const label = std.mem.join(a, " ", words.items) catch return 1;
+
+    if (label.len == 0) {
+        if (wait) {
+            err.writeAll("roost run: say which action to wait for.\n\n") catch {};
+            err.writeAll(run_usage) catch {};
+            return 2;
+        }
+        const r = askWindow(a, "run", sock, .actions, answer_timeout_ms * 4, err) orelse return 1;
+        const labels = r.labels orelse &.{};
+        if (labels.len == 0) {
+            out.writeAll("This window has no wired actions. Define them in .roost/actions.json in the project, or in ~/.config/roost/actions.json.\n") catch return 1;
+            return 0;
+        }
+        for (labels) |l| out.print("{s}\n", .{l}) catch return 1;
+        return 0;
+    }
+
+    const r = askWindow(a, "run", sock, .{ .run = .{ .label = label, .wait = wait } }, if (wait) no_timeout else answer_timeout_ms * 4, err) orelse return 1;
+    if (!wait) {
+        err.print("roost run: started \"{s}\".\n", .{label}) catch {};
+        return 0;
+    }
+    writeLine(out, r.text orelse "") catch return 1;
+    if (r.stopped orelse false) {
+        err.print("roost run: \"{s}\" was stopped from the window before it finished.\n", .{label}) catch {};
+        return r.code orelse 1;
+    }
+    const code = r.code orelse {
+        err.print("roost run: \"{s}\" ended without an exit code.\n", .{label}) catch {};
+        return 1;
+    };
+    if (code != 0) err.print("roost run: \"{s}\" failed (exit {d}).\n", .{ label, code }) catch {};
+    return code;
+}
+
+/// `roost open <file>[:line[:col]]`. Relative paths are resolved against
+/// `cwd`, the caller's directory, since the window may be somewhere else.
+fn open(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    sock: ?[]const u8,
+    cwd: []const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) u8 {
+    if (args.len == 1 and isHelp(args[0])) {
+        out.writeAll(open_usage) catch {};
+        return 0;
+    }
+    if (args.len != 1) {
+        err.writeAll(if (args.len == 0) "roost open: say which file.\n\n" else "roost open: give one file.\n\n") catch {};
+        err.writeAll(open_usage) catch {};
+        return 2;
+    }
+    const arg: []const u8 = args[0];
+    var loc = control.Location.parse(arg);
+    var path = std.fs.path.resolve(a, &.{ cwd, loc.path }) catch return 1;
+    if (!exists(path)) {
+        // A name that really has ":12" in it.
+        const whole = std.fs.path.resolve(a, &.{ cwd, arg }) catch return 1;
+        if (!exists(whole)) {
+            err.print("roost open: there's no file at {s}\n", .{path}) catch {};
+            return 1;
+        }
+        path = whole;
+        loc = .{ .path = arg };
+    }
+    _ = askWindow(a, "open", sock, .{ .open = .{ .path = path, .line = loc.line, .col = loc.col } }, open_timeout_ms, err) orelse return 1;
+    return 0;
+}
+
+fn exists(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+/// The caller's directory, or `/` when it's gone.
+fn cwdOrRoot(a: std.mem.Allocator) []const u8 {
+    return std.process.getCwdAlloc(a) catch "/";
 }
 
 const Options = struct {
@@ -411,6 +678,9 @@ test "options: flags, help, and mistakes" {
     try testing.expectEqualStrings("--watch", parseOptions(&.{"--watch"}).bad);
     try testing.expect(isCommand("status"));
     try testing.expect(isCommand("scratch"));
+    try testing.expect(isCommand("output"));
+    try testing.expect(isCommand("run"));
+    try testing.expect(isCommand("open"));
     try testing.expect(!isCommand("--class=dev.scottzirkel.Roost"));
 }
 
@@ -623,4 +893,135 @@ test "scratch: the window's error, an older window, and mistakes" {
     try testing.expectEqual(@as(u8, 1), scratch(a, &.{"read"}, null, null, &out, &err));
     try testing.expect(std.mem.indexOf(u8, err.buffered(), "not in a Roost pane") != null);
     try testing.expectEqualStrings("", out.buffered());
+}
+
+/// Which new command `commandAgainst` runs.
+const Cmd = enum { output, run, open };
+
+/// Run `roost <cmd> args` against a fake window that wants `want` and answers
+/// `reply`. `open` resolves paths against the fake window's temp directory,
+/// where `file` (if any) is created first. `{dir}` in `want` stands for that
+/// directory.
+fn commandAgainst(
+    cmd: Cmd,
+    args: []const [:0]const u8,
+    file: ?[]const u8,
+    want: []const u8,
+    reply: []const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+) !u8 {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    if (dir.len + "/roost-1.sock".len >= 108) return error.SkipZigTest;
+    if (file) |f| try tmp.dir.writeFile(.{ .sub_path = f, .data = "x\n" });
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try std.fs.path.join(a, &.{ dir, "roost-1.sock" });
+    const fd = try listen(path);
+    defer posix.close(fd);
+    const wanted = try std.mem.replaceOwned(u8, a, want, "{dir}", dir);
+    const t = try std.Thread.spawn(.{}, fakeWindow, .{ fd, wanted, reply });
+    defer t.join();
+    return switch (cmd) {
+        .output => output(a, args, path, out, err),
+        .run => runAction(a, args, path, out, err),
+        .open => open(a, args, path, dir, out, err),
+    };
+}
+
+test "output: the target's words, the line count, and what the window says" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [256]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.output, &.{ "-n", "5", "Run", "tests" }, null,
+        \\output {"target":"Run tests","lines":5}
+        \\
+    , "{\"text\":\"FAIL x\",\"code\":1}\n", &out, &err));
+    try testing.expectEqualStrings("FAIL x\n", out.buffered());
+    try testing.expectEqualStrings("roost output: \"Run tests\" failed (exit 1).\n", err.buffered());
+
+    out.end = 0;
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.output, &.{"shell"}, null,
+        \\output {"target":"shell","lines":50}
+        \\
+    , "{\"text\":\"$ make\\nok\\n\"}\n", &out, &err));
+    try testing.expectEqualStrings("$ make\nok\n", out.buffered());
+    try testing.expectEqualStrings("", err.buffered());
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), output(arena.allocator(), &.{}, "/nonexistent", &out, &err));
+    try testing.expectEqual(@as(u8, 2), output(arena.allocator(), &.{ "shell", "-n", "lots" }, "/nonexistent", &out, &err));
+}
+
+test "run: lists actions, starts one, or waits and passes on its exit code" {
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [256]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.run, &.{}, null, "actions\n", "{\"labels\":[\"Run tests\",\"Lint\"]}\n", &out, &err));
+    try testing.expectEqualStrings("Run tests\nLint\n", out.buffered());
+
+    out.end = 0;
+    try testing.expectEqual(@as(u8, 3), try commandAgainst(.run, &.{ "Run", "tests", "--wait" }, null,
+        \\run {"label":"Run tests","wait":true}
+        \\
+    , "{\"code\":3,\"text\":\"1 failed\"}\n", &out, &err));
+    try testing.expectEqualStrings("1 failed\n", out.buffered());
+    try testing.expectEqualStrings("roost run: \"Run tests\" failed (exit 3).\n", err.buffered());
+
+    out.end = 0;
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.run, &.{"Lint"}, null,
+        \\run {"label":"Lint","wait":false}
+        \\
+    , "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqualStrings("", out.buffered());
+    try testing.expectEqualStrings("roost run: started \"Lint\".\n", err.buffered());
+
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 1), try commandAgainst(.run, &.{"Deploy"}, null,
+        \\run {"label":"Deploy","wait":false}
+        \\
+    , "{\"error\":\"There's no action named \\\"Deploy\\\".\"}\n", &out, &err));
+    try testing.expectEqualStrings("roost run: There's no action named \"Deploy\".\n", err.buffered());
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(u8, 2), runAction(arena.allocator(), &.{"--wait"}, "/nonexistent", &out, &err));
+    try testing.expectEqual(@as(u8, 2), runAction(arena.allocator(), &.{ "Lint", "--force" }, "/nonexistent", &out, &err));
+}
+
+test "open: resolves the file against the caller's directory, with its line" {
+    var out_buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [512]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.open, &.{"a.zig:42:7"}, "a.zig",
+        \\open {"path":"{dir}/a.zig","line":42,"col":7}
+        \\
+    , "{\"ok\":true}\n", &out, &err));
+    // A name that really has a colon and digits in it.
+    try testing.expectEqual(@as(u8, 0), try commandAgainst(.open, &.{"log:12"}, "log:12",
+        \\open {"path":"{dir}/log:12","line":0,"col":0}
+        \\
+    , "{\"ok\":true}\n", &out, &err));
+    try testing.expectEqualStrings("", err.buffered());
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    // A missing file is caught before the window is asked.
+    try testing.expectEqual(@as(u8, 1), open(arena.allocator(), &.{"missing.zig:3"}, "/nonexistent", "/nonexistent-dir", &out, &err));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "there's no file at /nonexistent-dir/missing.zig") != null);
+    try testing.expectEqual(@as(u8, 2), open(arena.allocator(), &.{}, "/nonexistent", "/", &out, &err));
+    try testing.expectEqual(@as(u8, 2), open(arena.allocator(), &.{ "a", "b" }, "/nonexistent", "/", &out, &err));
 }

@@ -26,7 +26,9 @@
 //! one line of JSON back with the window's project, branch and agent state.
 //! That's how `roost status` and the desktop bar see every window. The
 //! `scratch-*` requests are `roost scratch`, which lets the agent read, add to
-//! and, when asked, rewrite the Scratchpad.
+//! and, when asked, rewrite the Scratchpad. `output`, `actions`, `run` and
+//! `open` need the window's actions and editor, so the `Host` (app.zig)
+//! answers them, through a `Pending` reply it can finish later.
 //!
 //! Hook names feed `claude_hooks.Liveness`: when the hooks that do run say one
 //! that's installed never has, the server warns once with a notification.
@@ -97,6 +99,9 @@ pub const Server = struct {
     /// Set once the hooks-look-wrong notification has been shown, so it shows
     /// once per window rather than on every hook after.
     warned_hooks: bool = false,
+    /// Answers the requests that need more than the workspace. Null until
+    /// `run` wires it, like `project`.
+    host: ?Host = null,
     /// Owned socket path (heap); unlinked + freed on `deinit`.
     path: [:0]u8,
     /// The listening service. Started on `init`; stopped/freed on `deinit`.
@@ -283,18 +288,66 @@ pub const Server = struct {
         reply: []u8,
     };
 
+    /// Who answers `output`, `actions`, `run` and `open`.
+    pub const Host = struct {
+        ctx: *anyopaque,
+        /// Must call `reply.finish` exactly once, now or later. `req`'s strings
+        /// live only for this call, so copy what outlives it.
+        handle: *const fn (ctx: *anyopaque, req: control.Request, reply: *Pending) void,
+    };
+
+    /// An answer the window owes a client. It holds the connection open until
+    /// `finish`, so a waited action can answer when it ends.
+    pub const Pending = struct {
+        server: *Server,
+        connection: *gio.SocketConnection,
+
+        /// Send `r` and close the connection. Frees the Pending.
+        pub fn finish(self: *Pending, r: control.Reply) void {
+            const server = self.server;
+            var out: std.Io.Writer.Allocating = .init(server.alloc);
+            defer out.deinit();
+            if (r.write(&out.writer)) |_| {
+                server.send(self.connection, out.written());
+            } else |_| {}
+            self.connection.as(gobject.Object).unref();
+            server.alloc.destroy(self);
+        }
+    };
+
     /// Answer a control request on its own connection, then close it. The
     /// write is asynchronous for the same reason the read is: a client that
     /// asks and never reads must not stall the window.
     fn answer(self: *Server, connection: *gio.SocketConnection, req: control.Request) void {
+        switch (req) {
+            .output, .actions, .run, .open => {
+                const host = self.host orelse {
+                    var out: std.Io.Writer.Allocating = .init(self.alloc);
+                    defer out.deinit();
+                    (control.Reply{ .@"error" = "This Roost window isn't ready yet. Try again in a moment." }).write(&out.writer) catch return;
+                    return self.send(connection, out.written());
+                };
+                const pending = self.alloc.create(Pending) catch return;
+                // Released in Pending.finish.
+                _ = connection.as(gobject.Object).ref();
+                pending.* = .{ .server = self, .connection = connection };
+                return host.handle(host.ctx, req, pending);
+            },
+            else => {},
+        }
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         self.reply(req, &out.writer) catch return;
+        self.send(connection, out.written());
+    }
+
+    /// Write `bytes` to the client asynchronously, then close the connection.
+    fn send(self: *Server, connection: *gio.SocketConnection, bytes: []const u8) void {
         const ctx = self.alloc.create(WriteCtx) catch return;
         ctx.* = .{
             .server = self,
             .connection = connection,
-            .reply = out.toOwnedSlice() catch {
+            .reply = self.alloc.dupe(u8, bytes) catch {
                 self.alloc.destroy(ctx);
                 return;
             },
@@ -356,6 +409,7 @@ pub const Server = struct {
             },
             .agent_note => try (control.Reply{ .text = control.agent_note }).write(w),
             .invalid => |why| try (control.Reply{ .@"error" = why }).write(w),
+            .output, .actions, .run, .open => unreachable, // answered by the host
         }
     }
 

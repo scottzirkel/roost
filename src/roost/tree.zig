@@ -32,6 +32,7 @@ pub const ScratchpadPane = @import("scratchpad_pane.zig").ScratchpadPane;
 const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const detect = @import("core/agent_detect.zig");
 const hook_msg = @import("core/hook_msg.zig");
+const nvim = @import("core/nvim.zig");
 
 const log = std.log.scoped(.roost_tree);
 
@@ -252,6 +253,9 @@ pub const Leaf = struct {
     /// The Claude Code session running in an Agent pane, from its hooks, so a
     /// reload can resume it. Empty until a hook reports one.
     session: Session = .{},
+    /// Where an Editor pane's Neovim listens, so `roost open` can steer it.
+    /// Empty for other roles, and when the editor isn't Neovim.
+    nvim: NvimAddr = .{},
     /// The vertical box holding [header label, pane content]. This is the
     /// widget parented into the tree (so it can be reparented as a unit).
     box: *gtk.Box,
@@ -280,6 +284,33 @@ pub const Session = struct {
         self.len = @intCast(id.len);
     }
 };
+
+/// A Neovim listen address, kept inline like `Session`. A Unix socket path
+/// is at most 108 bytes.
+pub const NvimAddr = struct {
+    buf: [108]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn get(self: *const NvimAddr) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    /// A new address for pane `id`, or an empty one when the editor isn't
+    /// Neovim or the path won't fit.
+    fn forEditor(id: u32) NvimAddr {
+        var self: NvimAddr = .{};
+        if (!nvim.isNeovim(editorCommand())) return self;
+        const dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+        const addr = nvim.listenAddress(&self.buf, dir, std.os.linux.getpid(), id, std.crypto.random.int(u32)) orelse return .{};
+        self.len = @intCast(addr.len);
+        return self;
+    }
+};
+
+/// The editor the Editor pane runs, from this process's environment.
+pub fn editorCommand() []const u8 {
+    return nvim.editorFrom(std.posix.getenv("EDITOR"), std.posix.getenv("VISUAL"));
+}
 
 /// A split node: a gtk.Paned with two child nodes.
 pub const Split = struct {
@@ -487,7 +518,8 @@ pub const Tree = struct {
         const id = next_pane_id;
         next_pane_id +%= 1;
         const resumed = if (role == .agent) nextResume() else null;
-        var pane = self.spawnPane(role, id, resumed);
+        const nvim_addr: NvimAddr = if (role == .editor) .forEditor(id) else .{};
+        var pane = self.spawnPane(role, id, resumed, nvim_addr.get());
         // Wire the close-request no-op on terminal panes if we have a handler.
         if (pane == .terminal) {
             if (self.close_cb) |cb| {
@@ -511,6 +543,7 @@ pub const Tree = struct {
                 &detect.generic,
         } };
         if (resumed) |session| node.leaf.session.set(session);
+        node.leaf.nvim = nvim_addr;
         // Autosave wiring needs the pane's FINAL address (it was moved into the
         // node above), so connect the scratchpad's `changed` handler here.
         if (node.leaf.pane == .scratchpad) node.leaf.pane.scratchpad.wire();
@@ -522,8 +555,9 @@ pub const Tree = struct {
     }
 
     /// Construct the pane content for a role. `id` becomes the terminal's
-    /// `ROOST_PANE`; `resumed` is a Claude session for an Agent pane to resume.
-    fn spawnPane(self: *Tree, role: Role, id: u32, resumed: ?[]const u8) Pane {
+    /// `ROOST_PANE`; `resumed` is a Claude session for an Agent pane to resume;
+    /// `nvim_addr`, when not empty, is where an Editor pane's Neovim listens.
+    fn spawnPane(self: *Tree, role: Role, id: u32, resumed: ?[]const u8, nvim_addr: []const u8) Pane {
         // Ghostty copies the command, so a stack buffer is enough.
         var cmd_buf: [1024]u8 = undefined;
         return switch (role) {
@@ -549,13 +583,27 @@ pub const Tree = struct {
             }) },
             .editor => .{ .terminal = TerminalPane.initGhostty(.{
                 // $EDITOR via shell expansion, falling back to nvim then vi.
-                .command = .{ .shell = "${EDITOR:-${VISUAL:-nvim}} || vi" },
+                // Neovim also listens, for `roost open`.
+                .command = .{ .shell = editorShellCommand(&cmd_buf, nvim_addr) },
                 .cwd = self.cwd,
                 .title = role.title(),
                 .pane_id = id,
             }) },
             .scratchpad => .{ .scratchpad = ScratchpadPane.init(self.alloc, self.scratch_path, self.scratch_autosave) },
         };
+    }
+
+    /// The Editor pane's command: `$EDITOR`, plus `--listen <addr>` when it's
+    /// Neovim and has an address.
+    fn editorShellCommand(buf: []u8, nvim_addr: []const u8) [:0]const u8 {
+        const plain = "${EDITOR:-${VISUAL:-nvim}} || vi";
+        if (nvim_addr.len == 0) return plain;
+        var w: std.Io.Writer = .fixed(buf);
+        w.writeAll("${EDITOR:-${VISUAL:-nvim}} --listen ") catch return plain;
+        nvim.shellQuote(&w, nvim_addr) catch return plain;
+        w.writeAll(" || vi\x00") catch return plain;
+        const out = w.buffered();
+        return out[0 .. out.len - 1 :0];
     }
 
     /// The Agent pane's command. With a session to resume and a Claude agent,
@@ -941,6 +989,61 @@ pub const Tree = struct {
         var any: ?*Node = null;
         terminalLeafWalk(self.root, role, &preferred, &any);
         return preferred orelse any;
+    }
+
+    /// Which pane `paneText` reads: the first one with a role, or one by its
+    /// place in tree order (0-based; Alt+1 is 0).
+    pub const PaneWhich = union(enum) { role: Role, index: usize };
+
+    /// A pane's text, owned by `alloc`: a terminal's scrollback and screen, or
+    /// a Scratchpad's notes. Null when there's no such pane or it can't be
+    /// read.
+    pub fn paneText(self: *Tree, alloc: Allocator, which: PaneWhich) ?[]u8 {
+        const node = switch (which) {
+            .role => |r| self.firstLeafOfRole(r),
+            .index => |i| self.leafAt(i),
+        } orelse return null;
+        return switch (node.leaf.pane) {
+            .terminal => |*t| {
+                const z = t.captureText(alloc) orelse return null;
+                defer alloc.free(z);
+                return alloc.dupe(u8, z) catch null;
+            },
+            .scratchpad => |*sp| sp.readText(alloc),
+        };
+    }
+
+    /// How many panes the tree holds.
+    pub fn paneCount(self: *Tree) usize {
+        var counter: usize = 0;
+        var none: ?*Node = null;
+        self.walkLeaves(self.root, &counter, std.math.maxInt(usize), &none);
+        return counter;
+    }
+
+    /// What `roost open` has to work with.
+    pub const EditorLink = union(enum) {
+        /// No Editor pane.
+        none,
+        /// An Editor pane whose editor isn't Neovim.
+        not_neovim,
+        /// The first Editor pane's Neovim address. Borrowed from the leaf, so
+        /// copy it before the tree changes.
+        addr: []const u8,
+    };
+
+    pub fn editorLink(self: *Tree) EditorLink {
+        const node = self.firstLeafOfRole(.editor) orelse return .none;
+        const addr = node.leaf.nvim.get();
+        return if (addr.len == 0) .not_neovim else .{ .addr = addr };
+    }
+
+    /// The leaf at `idx` in tree order, or null past the end.
+    fn leafAt(self: *Tree, idx: usize) ?*Node {
+        var counter: usize = 0;
+        var target: ?*Node = null;
+        self.walkLeaves(self.root, &counter, idx, &target);
+        return target;
     }
 
     /// Outcome of `captureAgentToScratchpad`, so the caller can give feedback.
