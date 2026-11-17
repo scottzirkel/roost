@@ -13,11 +13,6 @@ into the agent. Each new `roost` command gets a line in the agent's note
 (`agent_note` in `src/roost/core/control.zig`), and its message format goes in
 `src/roost/core/`, so the Mac app can reuse it.
 
-- **Resume the agent after a quit or a crash.** Reload keeps Claude's
-  conversation, but quitting, crashing or reopening the project starts fresh.
-  Save each Agent pane's session in the project's layout file. On the next
-  open, offer to resume them or start fresh. This matters more while the
-  NVIDIA close crash keeps happening (see Known issues).
 - **Hold text meant for a busy agent.** A failed action pastes its output into
   the Agent pane right away. If Claude is showing a permission prompt, Claude
   Code throws the paste away, so the failure never reaches the conversation.

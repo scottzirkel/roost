@@ -356,12 +356,7 @@ pub fn run() !void {
     // Order: this project's own saved layout → the user's default layout (if any)
     // → null (the built-in 2x2). A missing/malformed file falls through.
     var layout_arena = std.heap.ArenaAllocator.init(alloc);
-    const saved: ?*const tree.SerNode = blk: {
-        const bytes = project.readLayout(alloc, pane_cwd orelse "") orelse
-            project.readDefaultLayout(alloc) orelse break :blk null;
-        defer alloc.free(bytes);
-        break :blk tree.parseSer(layout_arena.allocator(), bytes);
-    };
+    const saved = loadLayout(alloc, layout_arena.allocator(), pane_cwd orelse "");
     if (saved != null) log.info("restoring saved layout", .{});
 
     // 6b. roost IPC socket. Create + listen BEFORE building the workspace so
@@ -398,7 +393,17 @@ pub fn run() !void {
         tree.queueResumes(sessions);
         log.info("resuming agent sessions: {s}", .{sessions});
         _ = internal_os.unsetenv("ROOST_RESUME_SESSIONS");
+    } else if (std.posix.getenv("ROOST_RESUME_SAVED") != null) {
+        // `roost reopen`: the user asked for these windows back, so resume
+        // the saved conversations instead of asking about each one.
+        if (saved) |ser| {
+            var buf: [1024]u8 = undefined;
+            const sessions = tree.savedSessions(ser, &buf);
+            tree.queueResumes(sessions);
+            log.info("reopen: resuming saved agent sessions: {s}", .{sessions});
+        }
     }
+    _ = internal_os.unsetenv("ROOST_RESUME_SAVED");
     workspace = Workspace.init(alloc, git_cmd, agent_cmd, pane_cwd, saved, .{
         .path = scratch_path,
         .autosave = cfg.scratchpad_autosave,
@@ -916,6 +921,22 @@ fn reExecSelf(a: *AppContext) !void {
     return std.posix.execvpeZ(std.os.argv[0], argv.ptr, std.c.environ);
 }
 
+/// The layout to build for `path`: the project's own saved layout, with its
+/// Agent panes' sessions, else the user's default layout without any, else
+/// null (the built-in 2x2). A missing or malformed file falls through. The
+/// result lives in `arena`.
+fn loadLayout(alloc: std.mem.Allocator, arena: std.mem.Allocator, path: []const u8) ?*tree.SerNode {
+    if (project.readLayout(alloc, path)) |bytes| {
+        defer alloc.free(bytes);
+        if (tree.parseSer(arena, bytes)) |ser| return ser;
+    }
+    const bytes = project.readDefaultLayout(alloc) orelse return null;
+    defer alloc.free(bytes);
+    const ser = tree.parseSer(arena, bytes) orelse return null;
+    tree.dropSessions(ser);
+    return ser;
+}
+
 /// Serialize the current workspace tree to the layout file keyed by the current
 /// project path (per-worktree persistence). Best-effort.
 fn saveLayout(app_ctx: *AppContext) void {
@@ -1347,7 +1368,9 @@ fn doResetLayout(a: *AppContext) void {
     const saved: ?*const tree.SerNode = blk: {
         const bytes = project.readDefaultLayout(a.alloc) orelse break :blk null;
         defer a.alloc.free(bytes);
-        break :blk tree.parseSer(arena.allocator(), bytes);
+        const ser = tree.parseSer(arena.allocator(), bytes) orelse break :blk null;
+        tree.dropSessions(ser);
+        break :blk ser;
     };
     const scratch_path = a.config.scratchpadPathFor(a.alloc, cwd orelse "");
     defer if (scratch_path) |p| a.alloc.free(p);
@@ -1480,6 +1503,9 @@ fn onDetectTick(data: ?*anyopaque) callconv(.c) c_int {
     const ctx: *AppContext = @ptrCast(@alignCast(data orelse return 0));
     if (ctx.workspace.pollAgents()) checkUnhookedTurn(ctx);
     applyAttention(ctx);
+    // A hook reported a new Claude session: save it now, so a crash can't
+    // lose the conversation to resume.
+    if (ctx.workspace.takeSessionsChanged()) saveLayout(ctx);
     return 1; // G_SOURCE_CONTINUE
 }
 
@@ -1563,12 +1589,7 @@ fn rebuildWorkspace(app_ctx: *AppContext, new_path: []const u8) void {
     saveLayout(app_ctx);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const saved: ?*const tree.SerNode = blk: {
-        const bytes = project.readLayout(alloc, new_project.path) orelse
-            project.readDefaultLayout(alloc) orelse break :blk null;
-        defer alloc.free(bytes);
-        break :blk tree.parseSer(arena.allocator(), bytes);
-    };
+    const saved = loadLayout(alloc, arena.allocator(), new_project.path);
 
     const scratch_path = app_ctx.config.scratchpadPathFor(alloc, new_project.path);
     defer if (scratch_path) |p| alloc.free(p);
@@ -2475,8 +2496,24 @@ fn onControlRequest(ctx: *anyopaque, req: control.Request, reply: *ipc.Server.Pe
         },
         .output => |o| controlOutput(a, o, reply),
         .open => |o| editor_remote.open(a.alloc, a.workspace.editorLink(), o, reply),
+        .close => {
+            // The user confirmed in `roost close --all`, so no dialog. Answer
+            // first, then quit a moment later so the answer can go out.
+            log.info("closing on request (roost close --all)", .{});
+            reply.finish(.{ .ok = true });
+            _ = glib.timeoutAdd(150, onCloseRequested, a);
+        },
         else => reply.finish(.{ .@"error" = "This request isn't one the window answers here." }),
     }
+}
+
+/// Quit as `roost close --all` asked: the normal quit, minus its question.
+/// It saves the layout, with each Agent pane's session for `roost reopen`.
+fn onCloseRequested(data: ?*anyopaque) callconv(.c) c_int {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return 0));
+    a.quit_confirmed = true;
+    a.window.as(gtk.Window).close();
+    return 0;
 }
 
 /// The action labeled `label`, ignoring case, since an agent may not match

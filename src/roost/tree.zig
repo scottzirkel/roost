@@ -33,6 +33,7 @@ const Surface = @import("../apprt/gtk/class/surface.zig").Surface;
 const detect = @import("core/agent_detect.zig");
 const hook_msg = @import("core/hook_msg.zig");
 const nvim = @import("core/nvim.zig");
+const resume_cmd = @import("core/resume.zig");
 
 const log = std.log.scoped(.roost_tree);
 
@@ -341,7 +342,12 @@ pub const Node = union(enum) {
 /// writer and parse via std.json.Value walking so a malformed file can never
 /// crash us (we just return null and the caller falls back to the default).
 pub const SerNode = union(enum) {
-    leaf: struct { role: []const u8 },
+    leaf: struct {
+        role: []const u8,
+        /// An Agent pane's last Claude session, or "". Offered for resuming
+        /// when the project opens (see `core/resume.zig`).
+        session: []const u8 = "",
+    },
     split: struct {
         orientation: []const u8, // "horizontal" | "vertical"
         ratio: f64, // start-child proportion, 0..1
@@ -355,6 +361,9 @@ pub const SerNode = union(enum) {
 pub const Tree = struct {
     alloc: Allocator,
     root: *Node,
+    /// Set when an Agent pane's session changes, so the app saves the layout
+    /// and a crash can't lose it. Cleared by `takeSessionsChanged`.
+    sessions_changed: bool = false,
     /// A stable single-child container (a vertical gtk.Box) that ALWAYS holds
     /// exactly the current root node's widget. The window's child is set to
     /// this container ONCE; root-level structural changes (split/collapse at
@@ -482,7 +491,7 @@ pub const Tree = struct {
         switch (ser.*) {
             .leaf => |l| {
                 const role = Role.fromKey(l.role) orelse return error.Invalid;
-                return self.makeLeaf(role);
+                return self.makeLeafWith(role, l.session);
             },
             .split => |s| {
                 const orientation: gtk.Orientation =
@@ -512,14 +521,27 @@ pub const Tree = struct {
 
     /// Allocate a leaf node for `role`, spawning its pane + header box.
     fn makeLeaf(self: *Tree, role: Role) Allocator.Error!*Node {
+        return self.makeLeafWith(role, "");
+    }
+
+    /// `makeLeaf`, for a pane restored from a layout that saved `saved`, an
+    /// Agent pane's last session. A queued resume (reload, `roost reopen`)
+    /// starts it right away; a saved one is offered first.
+    fn makeLeafWith(self: *Tree, role: Role, saved: []const u8) Allocator.Error!*Node {
         const node = try self.alloc.create(Node);
         errdefer self.alloc.destroy(node);
 
         const id = next_pane_id;
         next_pane_id +%= 1;
-        const resumed = if (role == .agent) nextResume() else null;
+        const queued = if (role == .agent) nextResume() else null;
+        const start: AgentStart = if (queued) |q|
+            .{ .session = q, .mode = .resume_now }
+        else if (role == .agent and hook_msg.validSession(saved))
+            .{ .session = saved, .mode = .ask }
+        else
+            .{};
         const nvim_addr: NvimAddr = if (role == .editor) .forEditor(id) else .{};
-        var pane = self.spawnPane(role, id, resumed, nvim_addr.get());
+        var pane = self.spawnPane(role, id, start, nvim_addr.get());
         // Wire the close-request no-op on terminal panes if we have a handler.
         if (pane == .terminal) {
             if (self.close_cb) |cb| {
@@ -542,7 +564,7 @@ pub const Tree = struct {
             else
                 &detect.generic,
         } };
-        if (resumed) |session| node.leaf.session.set(session);
+        if (start.session.len > 0) node.leaf.session.set(start.session);
         node.leaf.nvim = nvim_addr;
         // Autosave wiring needs the pane's FINAL address (it was moved into the
         // node above), so connect the scratchpad's `changed` handler here.
@@ -554,17 +576,24 @@ pub const Tree = struct {
         return node;
     }
 
+    /// How an Agent pane starts: fresh, or with a session to resume now or
+    /// to offer first.
+    const AgentStart = struct {
+        session: []const u8 = "",
+        mode: resume_cmd.Mode = .fresh,
+    };
+
     /// Construct the pane content for a role. `id` becomes the terminal's
-    /// `ROOST_PANE`; `resumed` is a Claude session for an Agent pane to resume;
+    /// `ROOST_PANE`; `start` says how an Agent pane picks up its last session;
     /// `nvim_addr`, when not empty, is where an Editor pane's Neovim listens.
-    fn spawnPane(self: *Tree, role: Role, id: u32, resumed: ?[]const u8, nvim_addr: []const u8) Pane {
+    fn spawnPane(self: *Tree, role: Role, id: u32, start: AgentStart, nvim_addr: []const u8) Pane {
         // Ghostty copies the command, so a stack buffer is enough.
         var cmd_buf: [1024]u8 = undefined;
         return switch (role) {
             // Agent runs the resolved agent command (e.g. `claude`) if we have
             // one; otherwise it falls back to the user's default shell (null).
             .agent => .{ .terminal = TerminalPane.initGhostty(.{
-                .command = if (self.agentCommand(&cmd_buf, resumed)) |c| .{ .shell = c } else null,
+                .command = if (self.agentCommand(&cmd_buf, start)) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
                 .pane_id = id,
@@ -606,15 +635,16 @@ pub const Tree = struct {
         return out[0 .. out.len - 1 :0];
     }
 
-    /// The Agent pane's command. With a session to resume and a Claude agent,
-    /// that's `<cmd> --resume <id> || <cmd>`: a session Claude can't find
-    /// exits with an error, and the pane starts a fresh one instead of closing.
-    /// The id is letters, digits and dashes only, so it's safe in the shell.
-    fn agentCommand(self: *const Tree, buf: []u8, resumed: ?[]const u8) ?[:0]const u8 {
+    /// The Agent pane's command. With a session and a Claude agent, it
+    /// resumes it, or asks first (see `core/resume.zig`). A session Claude
+    /// can't find exits with an error, and the pane starts a fresh one
+    /// instead of closing. The id is letters, digits and dashes only, so it's
+    /// safe in the shell.
+    fn agentCommand(self: *const Tree, buf: []u8, start: AgentStart) ?[:0]const u8 {
         const cmd = self.agent_cmd orelse return null;
-        const session = resumed orelse return cmd;
+        if (start.mode == .fresh or start.session.len == 0) return cmd;
         if (!std.mem.eql(u8, detect.manifestFor(cmd).id, "claude")) return cmd;
-        return std.fmt.bufPrintZ(buf, "{s} --resume {s} || {s}", .{ cmd, session, cmd }) catch cmd;
+        return resume_cmd.command(buf, cmd, start.session, start.mode) orelse cmd;
     }
 
     /// Allocate a split node wrapping two existing child nodes in a gtk.Paned.
@@ -1106,7 +1136,15 @@ pub const Tree = struct {
         else
             self.firstLeafOfRole(.agent) orelse return;
         if (node.leaf.role != .agent) return;
+        if (std.mem.eql(u8, node.leaf.session.get(), session)) return;
         node.leaf.session.set(session);
+        self.sessions_changed = true;
+    }
+
+    /// Whether an Agent pane's session changed since the last call.
+    pub fn takeSessionsChanged(self: *Tree) bool {
+        defer self.sessions_changed = false;
+        return self.sessions_changed;
     }
 
     /// Every Agent pane's session in tree order, comma-separated, for a reload
@@ -1638,7 +1676,13 @@ pub const Tree = struct {
     fn writeNode(self: *Tree, w: *std.Io.Writer, node: *Node) !void {
         switch (node.*) {
             .leaf => |l| {
-                try w.print("{{\"type\":\"leaf\",\"role\":\"{s}\"}}", .{l.role.key()});
+                // A session id is letters, digits and dashes, so it needs no
+                // JSON escaping.
+                const session = l.session.get();
+                if (l.role == .agent and session.len > 0)
+                    try w.print("{{\"type\":\"leaf\",\"role\":\"{s}\",\"session\":\"{s}\"}}", .{ l.role.key(), session })
+                else
+                    try w.print("{{\"type\":\"leaf\",\"role\":\"{s}\"}}", .{l.role.key()});
             },
             .split => |s| {
                 const ratio = currentRatio(s.paned);
@@ -1921,6 +1965,43 @@ fn consider(node: *Node, r: NRect, s: *FocusSearch) void {
     }
 }
 
+/// Forget a parsed layout's sessions, for a layout that isn't the project's
+/// own (the user's default layout): its sessions belong to another project.
+pub fn dropSessions(node: *SerNode) void {
+    switch (node.*) {
+        .leaf => |*l| l.session = "",
+        .split => |*sp| {
+            dropSessions(sp.start);
+            dropSessions(sp.end);
+        },
+    }
+}
+
+/// A parsed layout's Agent sessions, comma-separated in tree order, with an
+/// empty slot for an Agent pane that has none. The format `queueResumes`
+/// takes, so `roost reopen` can resume them without asking.
+pub fn savedSessions(node: *const SerNode, buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var first = true;
+    savedSessionsWalk(node, &w, &first) catch return "";
+    return w.buffered();
+}
+
+fn savedSessionsWalk(node: *const SerNode, w: *std.Io.Writer, first: *bool) std.Io.Writer.Error!void {
+    switch (node.*) {
+        .leaf => |l| {
+            if (!std.mem.eql(u8, l.role, "agent")) return;
+            if (!first.*) try w.writeByte(',');
+            first.* = false;
+            try w.writeAll(l.session);
+        },
+        .split => |sp| {
+            try savedSessionsWalk(sp.start, w, first);
+            try savedSessionsWalk(sp.end, w, first);
+        },
+    }
+}
+
 /// Parse layout JSON into an arena-allocated `SerNode`. Returns null on any
 /// malformed/invalid input (caller falls back to the default layout). The
 /// returned node lives in `arena`; the caller owns the arena.
@@ -1960,7 +2041,13 @@ fn serFromValue(arena: Allocator, value: std.json.Value) !*SerNode {
         };
         // Validate the role now so a bad role fails parse (-> default).
         _ = Role.fromKey(role_str) orelse return error.Invalid;
-        node.* = .{ .leaf = .{ .role = try arena.dupe(u8, role_str) } };
+        // A session that isn't one is dropped, not an error: the layout is
+        // still good.
+        const session: []const u8 = switch (obj.get("session") orelse std.json.Value{ .null = {} }) {
+            .string => |str| if (hook_msg.validSession(str)) try arena.dupe(u8, str) else "",
+            else => "",
+        };
+        node.* = .{ .leaf = .{ .role = try arena.dupe(u8, role_str), .session = session } };
         return node;
     } else if (std.mem.eql(u8, type_str, "split")) {
         const orient_val = obj.get("orientation") orelse return error.Invalid;

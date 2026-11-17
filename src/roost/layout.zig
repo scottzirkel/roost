@@ -255,6 +255,12 @@ pub const Workspace = struct {
         return self.t.routeToPane(node, bytes);
     }
 
+    /// Whether an Agent pane's session changed since the last call, so the
+    /// layout (which keeps sessions) needs saving.
+    pub fn takeSessionsChanged(self: *Workspace) bool {
+        return self.t.takeSessionsChanged();
+    }
+
     /// A pane's text, for `roost output`. See `Tree.paneText`.
     pub fn paneText(self: *Workspace, alloc: std.mem.Allocator, which: tree.Tree.PaneWhich) ?[]u8 {
         return self.t.paneText(alloc, which);

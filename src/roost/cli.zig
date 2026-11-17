@@ -13,6 +13,8 @@
 //!     roost run                    list this window's wired actions
 //!     roost run <action> [--wait]  run one, and with --wait report how it went
 //!     roost open <file>[:line[:col]] show a file in the Editor pane
+//!     roost close --all            close every window, saving them for reopen
+//!     roost reopen                 bring back the windows close --all closed
 //!
 //! It's the same binary that runs the window: `main` offers its argv here
 //! first, and starts the window only when the first word isn't a command.
@@ -25,6 +27,7 @@
 const std = @import("std");
 const posix = std.posix;
 const control = @import("core/control.zig");
+const resume_core = @import("core/resume.zig");
 
 const scratch_usage =
     \\usage: roost scratch read
@@ -84,6 +87,26 @@ const open_usage =
     \\
 ;
 
+const close_usage =
+    \\usage: roost close --all [--yes]
+    \\
+    \\Closes every Roost window, after asking. Each window saves its layout
+    \\and its Claude conversations as it closes, and the list of projects is
+    \\saved, so `roost reopen` brings them all back.
+    \\
+    \\  --yes  don't ask first (needed when there's no terminal to ask in)
+    \\
+;
+
+const reopen_usage =
+    \\usage: roost reopen
+    \\
+    \\Opens a window for each project `roost close --all` last closed, and
+    \\resumes each window's Claude conversations without asking. Projects
+    \\that already have a window are skipped.
+    \\
+;
+
 const usage =
     \\usage: roost status [--all] [--json] [--watch]
     \\
@@ -122,7 +145,7 @@ pub fn command() ?u8 {
 /// Keep in sync with the list in `scripts/roost-launch`, which passes these
 /// straight through instead of opening a window.
 fn isCommand(word: []const u8) bool {
-    const words = [_][]const u8{ "status", "scratch", "output", "run", "open" };
+    const words = [_][]const u8{ "status", "scratch", "output", "run", "open", "close", "reopen" };
     for (words) |w| if (std.mem.eql(u8, word, w)) return true;
     return false;
 }
@@ -151,6 +174,14 @@ pub fn run(args: []const [:0]const u8) u8 {
         runAction(a, rest, paneSocket(), &out.interface, &err.interface)
     else if (std.mem.eql(u8, cmd, "open"))
         open(a, rest, paneSocket(), cwdOrRoot(a), &out.interface, &err.interface)
+    else if (std.mem.eql(u8, cmd, "close")) code: {
+        const stdin = std.fs.File.stdin();
+        var in_buf: [256]u8 = undefined;
+        var in = stdin.reader(&in_buf);
+        const tty = if (stdin.isTty()) &in.interface else null;
+        break :code closeAll(a, rest, socketDir(), paneSocket(), closedFile(a), tty, &out.interface, &err.interface, pidGone);
+    } else if (std.mem.eql(u8, cmd, "reopen"))
+        reopen(a, rest, socketDir(), closedFile(a), &out.interface, &err.interface, launchWindow)
     else
         status(rest, &out.interface, &err.interface);
     out.interface.flush() catch return 1;
@@ -459,6 +490,226 @@ fn exists(path: []const u8) bool {
 /// The caller's directory, or `/` when it's gone.
 fn cwdOrRoot(a: std.mem.Allocator) []const u8 {
     return std.process.getCwdAlloc(a) catch "/";
+}
+
+/// Where `roost close --all` keeps the projects it closed.
+fn closedFile(a: std.mem.Allocator) ?[]const u8 {
+    return resume_core.closedPath(a, posix.getenv("XDG_STATE_HOME"), posix.getenv("HOME"));
+}
+
+/// True once `pid` has exited.
+fn pidGone(pid: i32) bool {
+    posix.kill(pid, 0) catch |e| return e == error.ProcessNotFound;
+    return false;
+}
+
+/// How long a window gets to close before it's reported as still open.
+const close_wait_ms = 5000;
+
+/// `roost close --all [--yes]`. Asks on `tty` (null when stdin isn't a
+/// terminal, which then needs --yes), saves the projects to `closed_file`,
+/// and closes every window, the caller's own (`own_sock`) last, since closing
+/// it ends this process too. `gone` says when a window's process has exited.
+fn closeAll(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    dir: []const u8,
+    own_sock: ?[]const u8,
+    closed_file: ?[]const u8,
+    tty: ?*std.Io.Reader,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+    gone: *const fn (i32) bool,
+) u8 {
+    var all = false;
+    var yes = false;
+    for (args) |arg| {
+        if (isHelp(arg)) {
+            out.writeAll(close_usage) catch {};
+            return 0;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            all = true;
+        } else if (std.mem.eql(u8, arg, "--yes") or std.mem.eql(u8, arg, "-y")) {
+            yes = true;
+        } else {
+            err.print("roost close: unknown option '{s}'\n\n", .{arg}) catch {};
+            err.writeAll(close_usage) catch {};
+            return 2;
+        }
+    }
+    if (!all) {
+        err.writeAll("roost close: say --all. It closes every Roost window.\n\n") catch {};
+        err.writeAll(close_usage) catch {};
+        return 2;
+    }
+
+    const windows = collect(a, dir) catch return 1;
+    if (windows.len == 0) {
+        out.writeAll("No Roost windows are running.\n") catch {};
+        return 0;
+    }
+    if (!yes) {
+        const in = tty orelse {
+            err.writeAll("roost close: there's no terminal to ask in. Add --yes to close every window without asking.\n") catch {};
+            return 2;
+        };
+        writeTexts(out, windows) catch {};
+        out.print("Close {s}? roost reopen brings {s} back, with {s} conversations. [y/N] ", .{
+            if (windows.len == 1) "this window" else "these windows",
+            if (windows.len == 1) "it" else "them",
+            if (windows.len == 1) "its" else "their",
+        }) catch {};
+        out.flush() catch {};
+        const answer = in.takeDelimiter('\n') catch null;
+        const yes_answer = if (answer) |line| std.ascii.startsWithIgnoreCase(std.mem.trim(u8, line, " \t\r"), "y") else false;
+        if (!yes_answer) {
+            out.writeAll("Nothing closed.\n") catch {};
+            return 1;
+        }
+    }
+
+    // Save the list first: closing our own window ends this process.
+    var projects: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (windows) |w| if (w.project.len > 0) projects.append(a, w.project) catch return 1;
+    if (closed_file) |path| saveClosed(a, path, projects.items) catch |e| {
+        err.print("roost close: couldn't save the list of windows to {s} ({s}), so nothing was closed.\n", .{ path, @errorName(e) }) catch {};
+        return 1;
+    };
+
+    const own_pid: ?i32 = if (own_sock) |p| control.socketPid(std.fs.path.basename(p)) else null;
+    var closed: usize = 0;
+    var stuck: std.ArrayListUnmanaged(control.Status) = .empty;
+    var own: ?control.Status = null;
+    for (windows) |w| {
+        if (own_pid != null and w.pid == own_pid.?) {
+            own = w;
+            continue;
+        }
+        if (closeOne(a, dir, w.pid, gone)) closed += 1 else stuck.append(a, w) catch {};
+    }
+
+    const total = closed + @intFromBool(own != null);
+    out.print("Closing {d} Roost window{s}. Bring {s} back with roost reopen.\n", .{ total, if (total == 1) "" else "s", if (total == 1) "it" else "them" }) catch {};
+    for (stuck.items) |w| {
+        if (w.name.len > 0)
+            err.print("roost close: {s} (window {d}) didn't close. If it's an older Roost build, reload it first, or close it by hand.\n", .{ w.name, w.pid }) catch {}
+        else
+            err.print("roost close: window {d} didn't close. It's an older Roost build: close it by hand.\n", .{w.pid}) catch {};
+    }
+    out.flush() catch {};
+    err.flush() catch {};
+    if (own) |w| _ = closeOne(a, dir, w.pid, gone);
+    return if (stuck.items.len == 0) 0 else 1;
+}
+
+/// Ask window `pid` to close, and wait for it to go. True when it did.
+fn closeOne(a: std.mem.Allocator, dir: []const u8, pid: i32, gone: *const fn (i32) bool) bool {
+    const name = std.fmt.allocPrint(a, "roost-{d}.sock", .{pid}) catch return false;
+    const path = std.fs.path.join(a, &.{ dir, name }) catch return false;
+    // The window answers, then quits; or quits before its answer gets out.
+    _ = ask(a, path, "close\n", answer_timeout_ms * 4) catch {};
+    var waited: u32 = 0;
+    while (waited < close_wait_ms) : (waited += 50) {
+        if (gone(pid)) return true;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    return gone(pid);
+}
+
+fn saveClosed(a: std.mem.Allocator, path: []const u8, projects: []const []const u8) !void {
+    if (std.fs.path.dirname(path)) |d| try std.fs.cwd().makePath(d);
+    var text: std.Io.Writer.Allocating = .init(a);
+    try (resume_core.Closed{ .projects = projects }).write(&text.writer);
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = text.written() });
+}
+
+/// `roost reopen`: a window for each project in `closed_file` that doesn't
+/// have one, started by `launch`. The list is removed afterwards, so running
+/// it twice doesn't double up.
+fn reopen(
+    a: std.mem.Allocator,
+    args: []const [:0]const u8,
+    dir: []const u8,
+    closed_file: ?[]const u8,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+    launch: *const fn (std.mem.Allocator, []const u8) bool,
+) u8 {
+    if (args.len > 0) {
+        if (args.len == 1 and isHelp(args[0])) {
+            out.writeAll(reopen_usage) catch {};
+            return 0;
+        }
+        err.print("roost reopen: unknown option '{s}'\n\n", .{args[0]}) catch {};
+        err.writeAll(reopen_usage) catch {};
+        return 2;
+    }
+    const nothing = "Nothing to reopen. roost close --all saves the windows it closes.\n";
+    const path = closed_file orelse {
+        out.writeAll(nothing) catch {};
+        return 1;
+    };
+    const text = std.fs.cwd().readFileAlloc(a, path, 1024 * 1024) catch {
+        out.writeAll(nothing) catch {};
+        return 1;
+    };
+    const list = resume_core.Closed.parse(a, text) catch {
+        err.print("roost reopen: {s} isn't a list of windows. Remove it, and close windows with roost close --all.\n", .{path}) catch {};
+        return 1;
+    };
+
+    const open_now = collect(a, dir) catch &.{};
+    var opened: usize = 0;
+    var failed = false;
+    for (list.projects) |project| {
+        const name = std.fs.path.basename(project);
+        const already = for (open_now) |w| {
+            if (std.mem.eql(u8, w.project, project)) break true;
+        } else false;
+        if (already) {
+            out.print("  {s} is already open.\n", .{name}) catch {};
+            continue;
+        }
+        if (!exists(project)) {
+            err.print("roost reopen: {s} isn't there anymore, so it's skipped.\n", .{project}) catch {};
+            continue;
+        }
+        if (launch(a, project)) {
+            out.print("  Opened {s}.\n", .{name}) catch {};
+            opened += 1;
+        } else {
+            err.print("roost reopen: couldn't open a window for {s}.\n", .{project}) catch {};
+            failed = true;
+        }
+    }
+    if (!failed) std.fs.cwd().deleteFile(path) catch {};
+    if (opened == 0 and !failed) out.writeAll("Every window was already open.\n") catch {};
+    return if (failed) 1 else 0;
+}
+
+/// Start a detached Roost window for `project` that resumes its saved
+/// conversations (ROOST_RESUME_SAVED). Like the window's own "open in a new
+/// window": `setsid` in the background, so it outlives this command.
+fn launchWindow(a: std.mem.Allocator, project: []const u8) bool {
+    const exe = std.fs.selfExePathAlloc(a) catch return false;
+    var env = std.process.getEnvMap(a) catch return false;
+    env.put("ROOST_PROJECT", project) catch return false;
+    env.put("ROOST_RESUME_SAVED", "1") catch return false;
+    // This shell may be a pane of a window that's gone, or another window's:
+    // the new window sets its own.
+    inline for (.{ "ROOST_SOCK", "ROOST_PANE", "ROOST_PROTOCOL", "GIO_LAUNCHED_DESKTOP_FILE_PID" }) |k| env.remove(k);
+    var child = std.process.Child.init(&.{
+        "/bin/sh", "-c",
+        "setsid \"$1\" --gtk-single-instance=false </dev/null >/dev/null 2>&1 &",
+        "sh",      exe,
+    }, a);
+    child.env_map = &env;
+    child.cwd = project;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    const term = child.spawnAndWait() catch return false;
+    return term == .Exited and term.Exited == 0;
 }
 
 const Options = struct {
@@ -1024,4 +1275,137 @@ test "open: resolves the file against the caller's directory, with its line" {
     try testing.expect(std.mem.indexOf(u8, err.buffered(), "there's no file at /nonexistent-dir/missing.zig") != null);
     try testing.expectEqual(@as(u8, 2), open(arena.allocator(), &.{}, "/nonexistent", "/", &out, &err));
     try testing.expectEqual(@as(u8, 2), open(arena.allocator(), &.{ "a", "b" }, "/nonexistent", "/", &out, &err));
+}
+
+/// A pretend window that answers several connections in turn: each pair is
+/// the request it wants and its answer.
+fn fakeWindowSeq(fd: posix.socket_t, turns: []const [2][]const u8) void {
+    for (turns) |t| fakeWindow(fd, t[0], t[1]);
+}
+
+fn alwaysGone(_: i32) bool {
+    return true;
+}
+
+test "close --all: asks, saves the projects, and closes the caller's window last" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    if (dir.len + "/roost-1234.sock".len >= 108) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const one = try listen(try std.fs.path.join(a, &.{ dir, "roost-11.sock" }));
+    defer posix.close(one);
+    const two = try listen(try std.fs.path.join(a, &.{ dir, "roost-22.sock" }));
+    defer posix.close(two);
+    const threads = [_]std.Thread{
+        try .spawn(.{}, fakeWindowSeq, .{ one, &[_][2][]const u8{
+            .{ "status\n", "{\"pid\":11,\"project\":\"/p/app\",\"name\":\"app\",\"branch\":\"main\",\"state\":\"working\"}\n" },
+            .{ "close\n", "{\"ok\":true}\n" },
+        } }),
+        try .spawn(.{}, fakeWindowSeq, .{ two, &[_][2][]const u8{
+            .{ "status\n", "{\"pid\":22,\"project\":\"/p/zed\",\"name\":\"zed\",\"branch\":\"\",\"state\":\"idle\"}\n" },
+            .{ "close\n", "{\"ok\":true}\n" },
+        } }),
+    };
+    defer for (threads) |t| t.join();
+
+    const file = try std.fs.path.join(a, &.{ dir, "state", "roost", "closed-windows.json" });
+    var out_buf: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [512]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    var tty: std.Io.Reader = .fixed("y\n");
+    const own = try std.fs.path.join(a, &.{ dir, "roost-11.sock" });
+    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, dir, own, file, &tty, &out, &err, alwaysGone));
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "Close these windows?") != null);
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "Closing 2 Roost windows.") != null);
+    try testing.expectEqualStrings("", err.buffered());
+    const saved = try std.fs.cwd().readFileAlloc(a, file, 4096);
+    try testing.expectEqualStrings("{\"projects\":[\"/p/app\",\"/p/zed\"]}\n", saved);
+}
+
+test "close: needs --all, and --yes when there's no terminal; a no closes nothing" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out_buf: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [1024]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{}, "/nonexistent", null, null, null, &out, &err, alwaysGone));
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{ "--all", "--force" }, "/nonexistent", null, null, null, &out, &err, alwaysGone));
+    // No windows: nothing to ask about.
+    try testing.expectEqual(@as(u8, 0), closeAll(a, &.{"--all"}, "/nonexistent", null, null, null, &out, &err, alwaysGone));
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "No Roost windows are running.") != null);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    if (dir.len + "/roost-1234.sock".len >= 108) return error.SkipZigTest;
+    const fd = try listen(try std.fs.path.join(a, &.{ dir, "roost-33.sock" }));
+    defer posix.close(fd);
+    const status_reply = "{\"pid\":33,\"project\":\"/p/x\",\"name\":\"x\",\"branch\":\"\",\"state\":\"idle\"}\n";
+    const t = try std.Thread.spawn(.{}, fakeWindowSeq, .{ fd, &[_][2][]const u8{ .{ "status\n", status_reply }, .{ "status\n", status_reply } } });
+    defer t.join();
+    err.end = 0;
+    try testing.expectEqual(@as(u8, 2), closeAll(a, &.{"--all"}, dir, null, null, null, &out, &err, alwaysGone));
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "Add --yes") != null);
+    out.end = 0;
+    var no: std.Io.Reader = .fixed("n\n");
+    try testing.expectEqual(@as(u8, 1), closeAll(a, &.{"--all"}, dir, null, null, &no, &out, &err, alwaysGone));
+    try testing.expect(std.mem.endsWith(u8, out.buffered(), "Nothing closed.\n"));
+}
+
+var launched: [4][]const u8 = undefined;
+var launched_count: usize = 0;
+
+fn fakeLaunch(a: std.mem.Allocator, project: []const u8) bool {
+    launched[launched_count] = a.dupe(u8, project) catch return false;
+    launched_count += 1;
+    return true;
+}
+
+test "reopen: opens what isn't open, skips what's gone, then forgets the list" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    if (dir.len + "/roost-1234.sock".len >= 108) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.makePath("app");
+    try tmp.dir.makePath("site");
+    const app = try std.fs.path.join(a, &.{ dir, "app" });
+    const site = try std.fs.path.join(a, &.{ dir, "site" });
+    const file = try std.fs.path.join(a, &.{ dir, "closed-windows.json" });
+    try saveClosed(a, file, &.{ app, site, "/nonexistent/gone" });
+
+    // `site` already has a window.
+    const fd = try listen(try std.fs.path.join(a, &.{ dir, "roost-44.sock" }));
+    defer posix.close(fd);
+    const reply = try std.fmt.allocPrint(a, "{{\"pid\":44,\"project\":\"{s}\",\"name\":\"site\",\"branch\":\"\",\"state\":\"idle\"}}\n", .{site});
+    const t = try std.Thread.spawn(.{}, fakeWindow, .{ fd, "status\n", reply });
+    defer t.join();
+
+    var out_buf: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var err_buf: [512]u8 = undefined;
+    var err: std.Io.Writer = .fixed(&err_buf);
+    launched_count = 0;
+    try testing.expectEqual(@as(u8, 0), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch));
+    try testing.expectEqual(@as(usize, 1), launched_count);
+    try testing.expectEqualStrings(app, launched[0]);
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "Opened app.") != null);
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "site is already open.") != null);
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "/nonexistent/gone isn't there anymore") != null);
+    // Forgotten, so a second reopen has nothing to do.
+    out.end = 0;
+    try testing.expectEqual(@as(u8, 1), reopen(a, &.{}, dir, file, &out, &err, fakeLaunch));
+    try testing.expect(std.mem.startsWith(u8, out.buffered(), "Nothing to reopen."));
 }

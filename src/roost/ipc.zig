@@ -320,7 +320,7 @@ pub const Server = struct {
     /// asks and never reads must not stall the window.
     fn answer(self: *Server, connection: *gio.SocketConnection, req: control.Request) void {
         switch (req) {
-            .output, .actions, .run, .open => {
+            .output, .actions, .run, .open, .close => {
                 const host = self.host orelse {
                     var out: std.Io.Writer.Allocating = .init(self.alloc);
                     defer out.deinit();
@@ -409,7 +409,7 @@ pub const Server = struct {
             },
             .agent_note => try (control.Reply{ .text = control.agent_note }).write(w),
             .invalid => |why| try (control.Reply{ .@"error" = why }).write(w),
-            .output, .actions, .run, .open => unreachable, // answered by the host
+            .output, .actions, .run, .open, .close => unreachable, // answered by the host
         }
     }
 

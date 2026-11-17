@@ -146,8 +146,9 @@ terminal.
 ln -sfn /path/to/roost/scripts/roost-launch ~/.local/bin/roost
 ```
 
-Commands such as `roost status`, `roost scratch`, `roost output`, `roost run`
-and `roost open` skip all of that: they go straight to the
+Commands such as `roost status`, `roost scratch`, `roost output`, `roost run`,
+`roost open`, `roost close` and `roost reopen` skip all of that: they go
+straight to the
 binary, open no window and close nothing, so an agent or a desktop bar can run
 them. `roost --help` (or `-h`, or `help`) prints a short usage message and stops,
 also without opening a window.

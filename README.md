@@ -62,6 +62,10 @@ surfaces** — GPU-accelerated, native, no Electron — rather than a web view o
   `opencode`, `gemini` — probed, not guessed), and an unrecognised agent still
   gets a live badge from its spinner and prompts. Hooks always win when they're
   reporting — scraping only fills the silence.
+- **Conversations survive a restart** — each project remembers its Agent
+  pane's Claude conversation and offers to resume it when you open the
+  project. `roost close --all` and `roost reopen` close every window and bring
+  them all back, conversations included.
 - **Many agents at once** — every Agent pane tracks its own state, and the
   window title rolls up whichever one most wants you (`🔔` > `✓` > `●`), so a
   Roost window that needs you says so from the taskbar.
@@ -161,6 +165,35 @@ roost status --all --watch   # JSON now and on every change, for a desktop bar
 
 A window running an older build doesn't answer; it's listed until you reload
 it.
+
+### Picking a conversation back up
+
+Each project remembers its Agent pane's last Claude conversation, saved as
+soon as it starts, so it survives a quit or a crash. When you open the
+project again, the Agent pane asks first:
+
+```text
+Resume your last conversation in this pane? [Y/n]
+```
+
+Enter resumes it; `n` starts a fresh one. A reload (`Ctrl+Shift+Q`) and
+`roost reopen` resume without asking. This needs Roost's Claude Code hooks,
+which report the conversation.
+
+### Closing and reopening every window
+
+To restart with several windows open, close them all at once and bring them
+back the same way:
+
+```sh
+roost close --all      # lists the windows, asks, then closes them all
+roost reopen           # a window for each, resuming each conversation
+```
+
+`roost close --all` saves each window's layout and conversations, and the
+list of projects, which survives a reboot. `roost reopen` skips projects that
+already have a window. Add `--yes` to close without asking, for a script or a
+keybinding.
 
 ### The agent and your notes
 
@@ -347,9 +380,9 @@ More in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Roost is **early but usable**, and in daily use. What's next — resuming the
-agent after a crash, long-running services, and a native macOS version — is
-in [ROADMAP.md](ROADMAP.md).
+Roost is **early but usable**, and in daily use. What's next — holding text
+for a busy agent, long-running services, and a native macOS version — is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

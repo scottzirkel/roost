@@ -104,6 +104,18 @@ A good isolated instance:
   `scratchpad-autosave = false` in `<scratch config>/roost/config`.
 - **Picks its project and agent** with `ROOST_PROJECT` and `ROOST_AGENT`, and
   unsets any inherited `ROOST_SOCK` and `ROOST_PANE`.
+- **Has its own runtime folder when testing `roost close --all`.** The CLI
+  finds windows by their sockets in `$XDG_RUNTIME_DIR`, so in the real one
+  it would close the user's windows too. Set `XDG_RUNTIME_DIR` to a short
+  private folder (mode 700; socket paths max out at 108 bytes) and
+  `WAYLAND_DISPLAY` to the compositor's socket by absolute path, such as
+  `/run/user/1000/wayland-1`, for the test windows and the CLI alike. For
+  windows that `roost reopen` starts, which outlive one `dbus-run-session`,
+  start the private bus yourself: `dbus-daemon
+  --config-file=scripts/test-session-bus.conf --fork --print-address=1
+  --print-pid=1`, export its address, and stop its pid afterwards. A fake
+  agent named `claude` that pipes `{"session_id":"..."}` to
+  `scripts/roost-notify session` stands in for Claude's hooks.
 - **Never shows, and never takes focus.** On Hyprland, a window rule has to
   catch it as it opens. Moving it afterwards is too late: a new window takes
   focus for up to a second, which makes every other window's header flash.

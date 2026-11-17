@@ -85,6 +85,7 @@ touching layout or app code.
 | `src/roost/core/hook_msg.zig` | Parses the hook socket's messages. |
 | `src/roost/core/control.zig` | Requests a client sends a window, the replies, and the agent's note on them. |
 | `src/roost/core/backups.zig` | The Scratchpad copies saved before a replace or clear. |
+| `src/roost/core/resume.zig` | Starting an Agent pane with its saved conversation (resume, or ask first), and the list `roost close --all` saves. |
 | `src/roost/core/nvim.zig` | The Editor pane's Neovim: its listen address and the expression that opens a file at a line. |
 | `src/roost/core/git_head.zig` | Reads the checked-out branch from `.git/HEAD`, without running git. |
 | `src/roost/core/claude_hooks.zig` | Checks and adds Claude Code hooks in `settings.json`, and tracks which ones run. |
@@ -149,6 +150,28 @@ belongs in `core/`; anything that touches a widget stays outside it.
   restored panes then start `claude --resume <id> || claude`, so a session
   Claude can't find falls back to a fresh one instead of closing the pane. The
   variable is cleared at startup, so new windows and later panes start fresh.
+- **The layout file keeps each Agent pane's session too,** as `"session"` on
+  its leaf, so a quit or a crash doesn't lose it. A hook reporting a new
+  session marks the tree (`sessions_changed`), and the agent-poll tick saves
+  the layout within 600 ms. Opening the project then builds the Agent pane
+  with a shell command that asks `Resume your last conversation in this pane?
+  [Y/n]` before starting `claude` (`core/resume.zig`). A question in the pane,
+  not a dialog, because the pane's command is fixed when the tree is built.
+  Sessions in the user's default layout are dropped: they belong to another
+  project.
+- **Which start a pane gets:** a reload's queued session resumes at once; so
+  does `roost reopen`, which sets `ROOST_RESUME_SAVED` and queues the saved
+  layout's sessions the same way. Otherwise a saved session is asked about,
+  and no session starts fresh.
+- **`roost close --all`** asks every window for `close`. The window answers,
+  then quits 150 ms later through the normal quit path minus its question, so
+  it saves the layout with its sessions. The CLI first writes the projects to
+  `$XDG_STATE_HOME/roost/closed-windows.json`, and closes its own window last,
+  since that ends the CLI too. It waits for each pid to exit, and names any
+  window that didn't, such as one on an older build.
+- **`roost reopen`** starts a detached window per saved project that has none
+  open (`setsid`, like "open in a new window"), then removes the list so a
+  second run doesn't double up.
 
 ## Agent awareness
 

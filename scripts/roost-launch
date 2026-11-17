@@ -27,7 +27,7 @@ bin="$here/../vendor/ghostty/zig-out/bin/roost"
 # may be an agent's shell or the desktop bar. Keep in sync with `isCommand` in
 # src/roost/cli.zig.
 case "${1-}" in
-  status|scratch|output|run|open) exec "$bin" "$@" ;;
+  status|scratch|output|run|open|close|reopen) exec "$bin" "$@" ;;
   # Help prints and stops. Without this, `roost --help` would open a window
   # (and the app would read --help as a bad setting) and close the caller.
   -h|--help|help)
@@ -38,6 +38,8 @@ usage: roost                 open a Roost window for the current folder
        roost output ...      print the end of a pane or an action's output
        roost run ...         list or run this window's wired actions
        roost open FILE:LINE  show a file in the Editor pane (Neovim)
+       roost close --all     close every window, saving them for reopen
+       roost reopen          bring back the windows close --all closed
 
 Opening a window closes the terminal you ran it from. Other arguments
 are passed to the new window as settings, such as --class=NAME.

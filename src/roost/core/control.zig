@@ -19,6 +19,7 @@
 //!     run {"label":"Run tests"}      ->  {"ok":true}, once it has started
 //!     run {"label":"Run tests","wait":true} -> {"code":1,"text":"..."}, once it ends
 //!     open {"path":"/abs/file.zig","line":42,"col":7} -> {"ok":true}
+//!     close                          ->  {"ok":true}, then the window quits
 //! A request the window can't carry out gets {"error":"..."}. A waited `run`
 //! and `open` answer later, when the work is done, on the same connection.
 //!
@@ -55,6 +56,9 @@ pub const Request = union(enum) {
     run: Run,
     /// Show a file at a line in the Editor pane.
     open: Open,
+    /// Quit the window, saving its layout and sessions, without asking.
+    /// `roost close --all` sends it, after asking the user itself.
+    close,
     /// A request word whose argument doesn't parse; answered with an error.
     invalid: []const u8,
 
@@ -130,6 +134,8 @@ pub const Request = union(enum) {
             .agent_note
         else if (std.mem.eql(u8, word, "actions"))
             .actions
+        else if (std.mem.eql(u8, word, "close"))
+            .close
         else
             null;
         const req = bare orelse return null;
@@ -153,6 +159,7 @@ pub const Request = union(enum) {
             .scratch_read => try w.writeAll("scratch-read"),
             .agent_note => try w.writeAll("agent-note"),
             .actions => try w.writeAll("actions"),
+            .close => try w.writeAll("close"),
             .scratch_append, .scratch_replace => |text| {
                 try w.writeAll(if (self == .scratch_append) "scratch-append " else "scratch-replace ");
                 try std.json.Stringify.value(.{ .text = text }, .{}, w);
@@ -415,6 +422,8 @@ test "request: output, run, actions and open, with their arguments" {
     try testing.expect(!Request.parse(a, "run {\"label\":\"Lint\"}").?.run.wait);
     try testing.expect(Request.parse(a, "run {\"command\":\"rm -rf /\"}").? == .invalid);
     try testing.expect(Request.parse(a, "actions").? == .actions);
+    try testing.expect(Request.parse(a, "close").? == .close);
+    try testing.expect(Request.parse(a, "close now").? == .invalid);
     try testing.expect(Request.parse(a, "actions please").? == .invalid);
 
     const open = Request.parse(a, "open {\"path\":\"/p/a.zig\",\"line\":42,\"col\":7}").?.open;
