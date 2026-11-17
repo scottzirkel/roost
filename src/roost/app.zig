@@ -6,7 +6,7 @@
 //!   -> gapp.register(...)        (fires startup -> setDefault; NO activate())
 //!   -> build OUR window + 4-pane Workspace
 //!   -> loop: glib.MainContext.iteration(ctx, 1); app.tick(&app_runtime)
-//!      until `running` flips on window close.
+//!      until the window closes, which exits the process (`exitNow`).
 //!
 //! We do NOT call activate(), so Ghostty never opens a window of its own.
 
@@ -113,11 +113,6 @@ const AppContext = struct {
 /// invisible. Detection is a fallback for un-hooked agents — hooked panes skip
 /// the work entirely — so it does not need to be instant.
 const detect_interval_ms: c_uint = 600;
-
-/// Whether our custom event loop should keep running. Module-level because the
-/// GTK signal handlers / GActions are C callbacks and flipping a global is the
-/// simplest clean-shutdown signal for the loop.
-var running: bool = true;
 
 /// Cleared once the window is committed to closing (in `onWindowCloseRequest`).
 /// A wired action runs on a detached thread and posts output/result back via
@@ -531,13 +526,14 @@ pub fn run() !void {
         presentFirstRunHint(&app_ctx);
     }
 
-    // 9. Run our own loop, ticking the core app each iteration.
+    // 9. Run our own loop, ticking the core app each iteration. It never ends
+    //    normally: closing the window exits the process (`exitNow`), so the
+    //    deferred teardown above runs only when a tick fails.
     log.debug("entering roost runloop", .{});
-    while (running) {
+    while (true) {
         _ = glib.MainContext.iteration(ctx, 1);
         try app.tick(&app_runtime);
     }
-    log.debug("exiting roost runloop", .{});
 }
 
 /// Returns true if `lazygit` is found (and executable) on PATH. Reuses
@@ -780,9 +776,7 @@ fn loadScratchFontCss(a: *AppContext) void {
 /// button funnel through here, so it's the one place to gate quitting. We veto
 /// the first request and show an unconditional confirmation; on confirm,
 /// `doQuit` sets `quit_confirmed` and re-issues the close, which lands back here
-/// and proceeds: save the layout, flip the loop off, and return false (0) so the
-/// default handler destroys the window. The deferred MainContext drain in `run`
-/// lets renderer/IO threads exit cleanly.
+/// and proceeds: stop actions, save the layout, and exit (`exitNow`).
 fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int {
     if (!app_ctx.quit_confirmed) {
         confirmDestructive(
@@ -803,8 +797,28 @@ fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int
     // flag first so the children's exit idles no-op against the torn-down state.)
     stopActiveRuns();
     saveLayout(app_ctx);
-    running = false;
-    return @intFromBool(false);
+    exitNow(app_ctx);
+}
+
+/// End the process without tearing the window down: write what still needs
+/// writing, then `_exit`.
+///
+/// Letting GTK destroy the window unrealizes every terminal's GL area, and on
+/// NVIDIA that sometimes faults inside the driver (the close crash in
+/// docs/development.md). The process is ending anyway, so skip the teardown,
+/// the way reload's `execve` already does. The kernel hangs up each pane's
+/// terminal as our file descriptors close, which ends the processes in it,
+/// just as it does on reload. `_exit`, not `exit`, so no library's exit
+/// handler runs while the renderer threads still hold GL.
+///
+/// Everything teardown did that outlives the process happens here instead:
+/// the scratchpad's pending autosave, the socket file and GSettings.
+fn exitNow(app_ctx: *AppContext) noreturn {
+    if (app_ctx.workspace.scratchpad()) |s| s.flush();
+    if (app_ctx.server) |s| s.deinit();
+    gio.Settings.sync();
+    log.info("window closed; exiting", .{});
+    std.c._exit(0);
 }
 
 /// Accept handler for the quit confirmation: authorize the close and re-issue

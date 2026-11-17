@@ -161,14 +161,23 @@ still changes, or re-probe.
 
 ### The pane-close crash
 
-Open as of 2026-10-23; see the [roadmap](../ROADMAP.md#known-issues).
+Open for closing a pane; see the [roadmap](../ROADMAP.md#known-issues).
 
 - **Stack:** `Tree.closeNode` → `gtk_paned_set_start_child(null)` →
   `GtkGLArea` unrealize → `delete_one_texture` → `gdk_gl_texture_release` →
   `gdk_memory_texture_from_texture` → `gdk_gl_context_download`
-  (`glGetTexImage`), which faults inside the NVIDIA driver.
-- **Seen with:** driver 610.57.04 and GTK 4.22.4. Vanilla Ghostty hits the same
-  stack on driver 615.78.08 and GTK 4.24.1 (ghostty discussion #14803).
+  (`glGetTexImage`), which faults inside the NVIDIA driver. Closing the window
+  used to reach the same code as GTK destroyed it.
+- **Seen with:** driver 610.57.04 and GTK 4.22.4, and still on driver
+  615.78.08 and GTK 4.24.1. Vanilla Ghostty hits the same stack on 615.78.08
+  and 4.24.1 (ghostty discussion #14803).
+- **Window close is fixed** by not tearing down: a confirmed quit saves what
+  it needs to and calls `_exit` (`exitNow` in `app.zig`). Reload's `execve`
+  skipped teardown the same way and never hit the crash.
+- **Reading these dumps:** `coredumpctl info` shows only the first 64 frames,
+  which stop inside nested `gtk_widget_unrealize` calls before reaching
+  Roost's code. Use gdb for the rest, against the binary that crashed: once
+  `./build.sh` has replaced it, gdb can't unwind the stack.
 - **Ruled out:** deferring the close to an idle callback, as Ghostty does.
   Ghostty's idle rebuild also unrealizes, and Ghostty still crashes.
 - **Untested ideas:** hide panes for a few frames before unparenting them, or

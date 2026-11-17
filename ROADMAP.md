@@ -49,8 +49,10 @@ This needs a Mac in the loop for building and testing, or a macOS CI runner.
   frees a terminal's GL texture, inside the NVIDIA driver. Vanilla Ghostty
   crashes the same way
   ([ghostty discussion #14803](https://github.com/ghostty-org/ghostty/discussions/14803)).
-  It started after the 2026-10-13 graphics-driver update, and hasn't recurred
-  since the 2026-10-22 reboot. We're waiting on a GTK or driver fix and not
+  It started after the 2026-10-13 graphics-driver update and still happens:
+  six times from 2026-10-14 to 2026-11-16. Closing the window no longer
+  triggers it, because quitting now exits before GTK frees anything. Closing
+  a single pane still can. We're waiting on a GTK or driver fix and not
   reporting upstream for now. Details are in
   [development](docs/development.md#the-pane-close-crash).
 

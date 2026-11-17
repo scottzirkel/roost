@@ -161,6 +161,15 @@ pub const ScratchpadPane = struct {
         self.restyle();
     }
 
+    /// Write a change still waiting on the autosave debounce, if any. Also
+    /// called on quit, which exits without destroying panes (`exitNow`).
+    pub fn flush(self: *ScratchpadPane) void {
+        if (self.save_source == 0) return;
+        _ = glib.Source.remove(self.save_source);
+        self.save_source = 0;
+        self.saveNow();
+    }
+
     /// Flush any pending change and release resources. Called from `Pane.destroy`
     /// (pane close, layout reset, project switch, clean exit) so the last edits
     /// in the debounce window are never lost.
@@ -170,11 +179,7 @@ pub const ScratchpadPane = struct {
             if (id != 0) gobject.signalHandlerDisconnect(sm.as(gobject.Object), id);
         }
         if (self.restyle_source != 0) _ = glib.Source.remove(self.restyle_source);
-        if (self.save_source != 0) {
-            _ = glib.Source.remove(self.save_source);
-            self.save_source = 0;
-            self.saveNow();
-        }
+        self.flush();
         // Release the keepalive ref taken in `init` (after the final saveNow has
         // read the buffer), letting the view + buffer finalize.
         self.text_view.as(gobject.Object).unref();

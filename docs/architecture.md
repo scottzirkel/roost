@@ -129,6 +129,12 @@ belongs in `core/`; anything that touches a widget stays outside it.
   is already running, it opens the project chooser instead, so each window
   picks its own project.
 - **New windows from inside Roost** are detached child processes.
+- **Quitting exits without tearing the window down.** After the confirmation,
+  Roost stops running actions, saves the layout and any pending scratchpad
+  edit, removes its socket, and calls `_exit`. Letting GTK destroy the
+  terminals sometimes crashes inside the NVIDIA driver (see
+  [the close crash](development.md#the-pane-close-crash)), and the process is
+  ending anyway. The processes in the panes end as their terminals close.
 - **Reload** (`Ctrl+Shift+Q`) saves the layout and re-execs the binary in
   place, so a fresh build takes over the same window. It re-execs `argv[0]`,
   not `/proc/self/exe`, because after a rebuild that link points to the
