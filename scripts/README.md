@@ -10,6 +10,7 @@
 | [`install-icon.sh`](#install-iconsh--the-app-icon) | Installs the app icon. |
 | [`check-core.sh`](#check-coresh--the-core-purity-check) | Fails the build if `src/roost/core/` imports a UI toolkit. |
 | [`test.sh`](#testsh--the-checks-ci-runs) | Runs the core check and every unit test; CI runs the same script. |
+| `test-session-bus.conf` | A private D-Bus config for isolated test instances that can't start real services. See [Isolated test instances](../docs/development.md#isolated-test-instances). |
 | [`patch-zig-linker.sh`](#patch-zig-linkersh--arch-linker-workaround) | Works around an Arch + Zig 0.15.2 linker bug. |
 
 Paths below use `/path/to/roost` for your clone.

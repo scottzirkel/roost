@@ -85,10 +85,15 @@ instance, track its PID, and stop only that PID.
 
 A good isolated instance:
 
-- **Runs under `dbus-run-session`,** so its app registration, notifications and
-  portal traffic stay off the real session bus. To see notifications, run a
-  small fake `org.freedesktop.Notifications` service on that private bus and
-  log what it receives.
+- **Runs on a private bus that can't start services:**
+  `dbus-run-session --config-file=scripts/test-session-bus.conf -- <roost>`.
+  Its app registration and notifications stay off the real session bus. The
+  stock session config would let that bus start real services, including
+  xdg-desktop-portal-hyprland, which crashes when the private bus shuts down
+  at the end of the test (version 1.4.1), leaving a core dump every run. With
+  this config GTK finds no portal and carries on. To see notifications, start
+  a small fake `org.freedesktop.Notifications` service on the private bus
+  yourself and log what it receives.
 - **Uses scratch XDG directories:** `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and
   `XDG_CACHE_HOME`.
 - **Looks normal.** Symlink the real `~/.config/ghostty` into the scratch config
