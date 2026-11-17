@@ -34,6 +34,7 @@ const detect = @import("core/agent_detect.zig");
 const hook_msg = @import("core/hook_msg.zig");
 const nvim = @import("core/nvim.zig");
 const resume_cmd = @import("core/resume.zig");
+const files_pane = @import("files_pane.zig");
 
 const log = std.log.scoped(.roost_tree);
 
@@ -600,6 +601,9 @@ pub const Tree = struct {
     fn spawnPane(self: *Tree, role: Role, id: u32, start: AgentStart, nvim_addr: []const u8) Pane {
         // Ghostty copies the command, so a stack buffer is enough.
         var cmd_buf: [1024]u8 = undefined;
+        var files_arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer files_arena.deinit();
+        const files_command: ?[:0]const u8 = if (role == .files) self.filesCommand(files_arena.allocator()) else null;
         return switch (role) {
             // Agent runs the resolved agent command (e.g. `claude`) if we have
             // one; otherwise it falls back to the user's default shell (null).
@@ -630,13 +634,44 @@ pub const Tree = struct {
                 .pane_id = id,
             }) },
             .files => .{ .terminal = TerminalPane.initGhostty(.{
-                .command = if (files_cmd) |c| .{ .shell = c } else null,
+                .command = if (files_command) |c| .{ .shell = c } else null,
                 .cwd = self.cwd,
                 .title = role.title(),
                 .pane_id = id,
             }) },
             .scratchpad => .{ .scratchpad = ScratchpadPane.init(self.alloc, self.scratch_path, self.scratch_autosave) },
         };
+    }
+
+    /// The Files pane's command: yazi at the project's `files-dir`, sorted by
+    /// its `files-sort` (`.roost/config`; see `files_pane.zig`), or null for
+    /// the shell when yazi isn't installed.
+    fn filesCommand(self: *const Tree, arena: Allocator) ?[:0]const u8 {
+        const program = files_cmd orelse return null;
+        const project: []const u8 = self.cwd orelse "";
+        if (project.len == 0) return program;
+        const cfg_path = std.fs.path.join(arena, &.{ project, ".roost", "config" }) catch return program;
+        const text = std.fs.cwd().readFileAlloc(arena, cfg_path, 64 * 1024) catch "";
+        const settings = files_pane.Settings.parse(text);
+        const dir = files_pane.startDir(arena, project, settings.dir);
+        var config_home: []const u8 = "";
+        if (settings.sort != .name) built: {
+            const state = std.posix.getenv("XDG_STATE_HOME");
+            const base = if (state != null and state.?.len > 0)
+                state.?
+            else
+                std.fs.path.join(arena, &.{ std.posix.getenv("HOME") orelse break :built, ".local", "state" }) catch break :built;
+            var hash_buf: [16]u8 = undefined;
+            const hash = std.fmt.bufPrint(&hash_buf, "{x:0>16}", .{std.hash.Wyhash.hash(0, project)}) catch break :built;
+            const out = std.fs.path.join(arena, &.{ base, "roost", "yazi", hash }) catch break :built;
+            const user = files_pane.userConfigDir(arena, std.posix.getenv("YAZI_CONFIG_HOME"), std.posix.getenv("XDG_CONFIG_HOME"), std.posix.getenv("HOME")) orelse "";
+            files_pane.buildConfig(arena, user, out, settings.sort) catch |e| {
+                log.warn("files pane: couldn't build the yazi config in {s}: {}", .{ out, e });
+                break :built;
+            };
+            config_home = out;
+        }
+        return files_pane.command(arena, program, dir, config_home) catch program;
     }
 
     /// The Editor pane's command: `$EDITOR`, plus `--listen <addr>` when it's

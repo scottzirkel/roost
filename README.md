@@ -364,6 +364,22 @@ default, and `on_success` / `on_failure` override it by exit code. Actions run
 in the background with live output and a Stop button, so a long test suite
 never blocks the window.
 
+### The Files pane
+
+`Ctrl+Shift+X` adds a Files pane running [yazi](https://yazi-rs.github.io). It
+opens in the project folder, or where the project's `.roost/config` says:
+
+```ini
+files-dir = output/router   # relative to the project, or absolute
+files-sort = newest         # newest | modified | name
+```
+
+`newest` lists the newest-created first and shows each file's creation time;
+`modified` does the same by last change. yazi only sorts from its config, so
+for these Roost gives that pane its own copy of your yazi config with the sort
+added, and yazi elsewhere keeps yours. To sort that way everywhere, put
+`sort_by` and `sort_reverse` under `[mgr]` in your own `yazi.toml` instead.
+
 ### Services
 
 A service is an action that keeps running, such as a dev server. Add
