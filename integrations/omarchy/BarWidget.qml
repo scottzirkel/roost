@@ -7,7 +7,9 @@ import qs.Commons as Commons
 
 // Roost on the Omarchy bar: every Roost window's agent state, and a click to
 // jump to one. Left click lists the windows; right click jumps to the one that
-// wants you most.
+// wants you most. The list also closes every window at once and reopens them
+// (`roost close --all`, `roost reopen`), so the widget stays on the bar while
+// there are closed windows to bring back.
 //
 // The data comes from `roost status --all --watch`, which prints one line of
 // JSON now and again whenever any window changes. One long-running process,
@@ -19,7 +21,13 @@ BarWidget {
 
   // [{ pid, project, name, branch, state }], sorted by name, from `roost`.
   property var windows: []
+  // How many windows `roost close --all` saved for `roost reopen`.
+  property int closed: 0
   property bool popupOpen: false
+  // Close all takes two clicks: the first turns this on and asks again.
+  property bool confirmClose: false
+
+  onPopupOpenChanged: if (!popupOpen) confirmClose = false
 
   readonly property string command: String(setting("command", "roost"))
   readonly property int waiting: count("needs-input")
@@ -30,6 +38,7 @@ BarWidget {
     + (waiting > 0 ? "  󰂚 " + waiting : "")
     + (working > 0 ? "  ● " + working : "")
     + (finished > 0 ? "  ✓ " + finished : "")
+    + (closed > 0 ? "  ↺ " + closed : "")
 
   readonly property string tooltip: {
     var lines = []
@@ -38,6 +47,7 @@ BarWidget {
       var words = stateWords(w.state)
       lines.push(title(w) + (w.branch ? " · " + w.branch : "") + (words ? " — " + words : ""))
     }
+    if (closed > 0) lines.push(closed + " closed " + (closed === 1 ? "window" : "windows") + " to reopen")
     return lines.join("\n")
   }
 
@@ -51,6 +61,7 @@ BarWidget {
     try {
       var parsed = JSON.parse(line)
       windows = Array.isArray(parsed.windows) ? parsed.windows : []
+      closed = Number(parsed.closed) > 0 ? Number(parsed.closed) : 0
     } catch (e) {
       // A line we can't read changes nothing; the next one will say.
     }
@@ -100,7 +111,23 @@ BarWidget {
 
   function close() { popupOpen = false }
 
-  visible: windows.length > 0
+  // Close every window, after a second click. Each saves its layout and
+  // conversations, so `roost reopen` brings them all back.
+  function closeAll() {
+    if (!confirmClose) {
+      confirmClose = true
+      return
+    }
+    popupOpen = false
+    Util.execArgv([root.command, "close", "--all", "--yes"])
+  }
+
+  function reopenAll() {
+    popupOpen = false
+    Util.execArgv([root.command, "reopen"])
+  }
+
+  visible: windows.length > 0 || closed > 0
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: barSize
 
@@ -128,6 +155,7 @@ BarWidget {
     }
     onExited: {
       root.windows = []
+      root.closed = 0
       restartTimer.restart()
     }
   }
@@ -232,6 +260,57 @@ BarWidget {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: root.focusWindow(row.modelData)
+          }
+        }
+      }
+
+      // Close every window, or bring back the ones closed that way.
+      Repeater {
+        model: [
+          { key: "close", shown: root.windows.length > 0 },
+          { key: "reopen", shown: root.closed > 0 }
+        ]
+
+        BorderSurface {
+          id: act
+          required property var modelData
+
+          readonly property bool hovered: actMouse.containsMouse
+          readonly property color fg: root.bar ? root.bar.foreground : Commons.Color.foreground
+          readonly property string text: modelData.key === "close"
+            ? (root.confirmClose
+              ? "Click again to close " + root.windows.length + (root.windows.length === 1 ? " window" : " windows")
+              : "Close all windows")
+            : "Reopen " + root.closed + " closed " + (root.closed === 1 ? "window" : "windows")
+
+          visible: modelData.shown
+          width: list.width
+          height: actText.implicitHeight + Style.space(10)
+          radius: Style.spacing.labelGap
+          color: hovered ? Style.selectedFillFor(fg, Commons.Color.accent) : "transparent"
+          borderSpec: hovered ? Border.controlSpec("normal", fg, Commons.Color.accent) : Border.none()
+
+          Text {
+            id: actText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: act.borderLeft + Style.space(34)
+            anchors.rightMargin: act.borderRight + Style.space(8)
+            textFormat: Text.PlainText
+            text: act.text
+            color: act.modelData.key === "close" && root.confirmClose && root.bar ? root.bar.urgent : act.fg
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideRight
+          }
+
+          MouseArea {
+            id: actMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: act.modelData.key === "close" ? root.closeAll() : root.reopenAll()
           }
         }
       }

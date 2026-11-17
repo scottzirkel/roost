@@ -174,6 +174,22 @@ belongs in `core/`; anything that touches a widget stays outside it.
 - **`roost reopen`** starts a detached window per saved project that has none
   open (`setsid`, like "open in a new window"), then removes the list so a
   second run doesn't double up.
+- **The window and the bar run the CLI** for both, so there's one
+  implementation. Close All Windows (`Ctrl+Shift+Alt+Q`, the window menu)
+  lists the windows from `roost status --all --json`, run asynchronously,
+  since the window answers that request too and its loop must keep running.
+  On confirm it starts `roost close --all --yes`, detached with `setsid`, so
+  it outlives the window; it inherits our `ROOST_SOCK`, so it closes this
+  window last. The Quit dialog's Close All Windows does the same without the
+  list. Reopen (the window menu, the chooser) starts `roost reopen`. They run
+  argv[0], since `/proc/self/exe` points at a deleted file after a rebuild.
+- **A desktop launch with no Roost running reopens the closed windows** when
+  there's a saved list: the process starts `roost reopen` and exits before
+  building a window of its own. Once reopened, the list is gone, so the next
+  launch opens the last project as before.
+- **`roost status --all --json` adds `"closed": N`** while windows are saved
+  for reopening. The bar widget stays visible on it, shows ↺ N, and offers
+  Reopen; its Close all needs a second click.
 - **Reopened windows go back to their workspaces** on Hyprland (`hypr.zig`).
   Before starting each window, `reopen` turns on a named rule
   (`roost-reopen-<n>`) matching its first title, `Roost — <project>`, plus

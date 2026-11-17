@@ -858,7 +858,7 @@ fn status(args: []const [:0]const u8, out: *std.Io.Writer, err: *std.Io.Writer) 
     const dir = socketDir();
     if (!o.watch) {
         const windows = collect(a, dir) catch return 1;
-        const ok = if (o.json) writeJson(out, windows) else writeTexts(out, windows);
+        const ok = if (o.json) writeJson(out, windows, closedCount(a)) else writeTexts(out, windows);
         ok catch return 1;
         return 0;
     }
@@ -871,7 +871,7 @@ fn status(args: []const [:0]const u8, out: *std.Io.Writer, err: *std.Io.Writer) 
         _ = arena.reset(.retain_capacity);
         const windows = collect(a, dir) catch continue;
         var line: std.Io.Writer.Allocating = .init(a);
-        writeJson(&line.writer, windows) catch continue;
+        writeJson(&line.writer, windows, closedCount(a)) catch continue;
         if (std.mem.eql(u8, line.written(), last.items)) continue;
         out.writeAll(line.written()) catch return 0;
         out.flush() catch return 0;
@@ -958,9 +958,21 @@ fn ask(arena: std.mem.Allocator, path: []const u8, request: []const u8, timeout_
     return reply.items;
 }
 
-fn writeJson(out: *std.Io.Writer, windows: []const control.Status) std.Io.Writer.Error!void {
-    try std.json.Stringify.value(.{ .windows = windows }, .{}, out);
+/// The windows as one line of JSON, plus `closed`, how many windows
+/// `roost close --all` saved for `roost reopen`, when there are any. The bar
+/// widget uses it to offer a reopen while no window is open.
+fn writeJson(out: *std.Io.Writer, windows: []const control.Status, closed: usize) std.Io.Writer.Error!void {
+    if (closed > 0)
+        try std.json.Stringify.value(.{ .windows = windows, .closed = closed }, .{}, out)
+    else
+        try std.json.Stringify.value(.{ .windows = windows }, .{}, out);
     try out.writeByte('\n');
+}
+
+/// How many windows are saved for `roost reopen`.
+fn closedCount(a: std.mem.Allocator) usize {
+    const path = closedFile(a) orelse return 0;
+    return resume_core.loadClosed(a, path).windows.len;
 }
 
 fn writeTexts(out: *std.Io.Writer, windows: []const control.Status) std.Io.Writer.Error!void {
@@ -1108,11 +1120,14 @@ test "collect: windows that answer, an older one, and dead sockets" {
 
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try writeJson(&w, windows[2..]);
+    try writeJson(&w, windows[2..], 0);
     try testing.expectEqualStrings(
         \\{"windows":[{"pid":33,"project":"","name":"","branch":"","state":"unknown"}]}
         \\
     , w.buffered());
+    var w2: std.Io.Writer = .fixed(&buf);
+    try writeJson(&w2, &.{}, 3);
+    try testing.expectEqualStrings("{\"windows\":[],\"closed\":3}\n", w2.buffered());
 }
 
 /// Run `roost scratch` with `args` against a fake window that wants `want`

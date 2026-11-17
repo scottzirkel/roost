@@ -41,6 +41,7 @@ const ansi = @import("ansi.zig");
 const detect = @import("core/agent_detect.zig");
 const claude_hooks = @import("core/claude_hooks.zig");
 const control = @import("core/control.zig");
+const resume_core = @import("core/resume.zig");
 const editor_remote = @import("editor_remote.zig");
 const build_info = @import("build_info.zig");
 
@@ -285,6 +286,16 @@ pub fn run() !void {
         return;
     }
 
+    // 4c. Opened from the desktop launcher with no Roost running, after
+    //     `roost close --all`: bring every closed window back, rather than
+    //     only the last project. `roost reopen` starts them; this process
+    //     exits without a window of its own.
+    if (internal_os.launchedFromDesktop() and !projectInEnv() and !ipc.liveSiblingExists() and closedWindowCount(alloc) > 0) {
+        log.info("desktop launch after close-all: reopening the closed windows", .{});
+        runRoostCli(alloc, &.{"reopen"});
+        return;
+    }
+
     // 5. Build our window.
     const window = gobject.ext.newInstance(gtk.ApplicationWindow, .{
         .application = gapp.as(gtk.Application),
@@ -339,10 +350,7 @@ pub fn run() !void {
     // project CHOOSER (each window picks its own project) instead of auto-
     // opening the last project. A first launch (no sibling) still opens the
     // last project directly. CLI launches (ROOST_PROJECT/cwd) are unaffected.
-    const open_chooser_on_start = blk: {
-        const has_env = if (std.posix.getenv("ROOST_PROJECT")) |v| v.len > 0 else false;
-        break :blk internal_os.launchedFromDesktop() and !has_env and ipc.liveSiblingExists();
-    };
+    const open_chooser_on_start = internal_os.launchedFromDesktop() and !projectInEnv() and ipc.liveSiblingExists();
     const project_dir: ?Project = if (open_chooser_on_start) null else resolveInitialProject(alloc);
 
     const pane_cwd: ?[:0]const u8 = if (project_dir) |p| p.path else null;
@@ -737,6 +745,27 @@ fn installHeaderBar(a: *AppContext) void {
     help.as(gtk.Actionable).setActionName("win.show-help");
     bar.packEnd(help.as(gtk.Widget));
 
+    // The window menu: closing and reopening every window, reload and quit.
+    const menu = gio.Menu.new();
+    defer menu.unref(); // setMenuModel takes its own ref
+    const windows = gio.Menu.new();
+    defer windows.unref();
+    windows.append("Close All Windows…", "win.close-all");
+    windows.append("Reopen Closed Windows", "win.reopen-closed");
+    menu.appendSection(null, windows.as(gio.MenuModel));
+    const this = gio.Menu.new();
+    defer this.unref();
+    this.append("Reload", "win.reload");
+    this.append("Quit", "win.close");
+    menu.appendSection(null, this.as(gio.MenuModel));
+    const menu_btn = gtk.MenuButton.new();
+    menu_btn.setIconName("roost-menu-symbolic");
+    menu_btn.as(gtk.Widget).setTooltipText("Window menu");
+    menu_btn.setMenuModel(menu.as(gio.MenuModel));
+    // Grey out Reopen when there's nothing to reopen, checked as it opens.
+    if (menu_btn.getPopover()) |pop| _ = gtk.Widget.signals.show.connect(pop.as(gtk.Widget), *AppContext, onWindowMenuShow, a, .{});
+    bar.packEnd(menu_btn.as(gtk.Widget));
+
     window.as(gtk.Window).setTitlebar(bar.as(gtk.Widget));
 }
 
@@ -798,14 +827,7 @@ fn loadScratchFontCss(a: *AppContext) void {
 /// and proceeds: stop actions, save the layout, and exit (`exitNow`).
 fn onWindowCloseRequest(_: *gtk.Window, app_ctx: *AppContext) callconv(.c) c_int {
     if (!app_ctx.quit_confirmed) {
-        confirmDestructive(
-            app_ctx,
-            "Quit Roost?",
-            "This closes the window and ends everything running in it.",
-            "Quit",
-            doQuit,
-            true, // Quit is the default → Ctrl+Q then Enter quits.
-        );
+        confirmQuit(app_ctx);
         return @intFromBool(true); // veto: keep the window open behind the dialog
     }
     // Committed to closing: stop any in-flight action's idle callback from
@@ -840,7 +862,170 @@ fn exitNow(app_ctx: *AppContext) noreturn {
     std.c._exit(0);
 }
 
-/// Accept handler for the quit confirmation: authorize the close and re-issue
+/// The quit confirmation. Quit is the default, so Ctrl+Q then Enter quits;
+/// Close All Windows sits beside it for a restart, never the default.
+fn confirmQuit(a: *AppContext) void {
+    const dialog = adw.AlertDialog.new(
+        "Quit Roost?",
+        "This closes the window and ends everything running in it. Close All Windows closes every Roost window, saving them so they can all be reopened.",
+    );
+    dialog.addResponse("cancel", "Cancel");
+    dialog.addResponse("closeall", "Close All Windows");
+    dialog.addResponse("quit", "Quit");
+    dialog.setResponseAppearance("quit", .destructive);
+    dialog.setDefaultResponse("quit");
+    dialog.setCloseResponse("cancel"); // Esc always cancels.
+    dialog.choose(a.window.as(gtk.Widget), null, onQuitResponse, a);
+}
+
+fn onQuitResponse(source: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return));
+    const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
+    const response = std.mem.span(dialog.chooseFinish(res));
+    if (std.mem.eql(u8, response, "quit")) doQuit(a) else if (std.mem.eql(u8, response, "closeall")) closeAllWindows(a);
+}
+
+// --- Close all / reopen -------------------------------------------------------
+// The work is the CLI's (`roost close --all`, `roost reopen` in cli.zig); the
+// window runs it, so the two can't drift apart.
+
+fn projectInEnv() bool {
+    const v = std.posix.getenv("ROOST_PROJECT") orelse return false;
+    return v.len > 0;
+}
+
+/// How many windows `roost close --all` saved for `roost reopen`.
+fn closedWindowCount(alloc: std.mem.Allocator) usize {
+    return closedWindowCountExcept(alloc, "");
+}
+
+/// The same, leaving out `skip`, this window's own project, which reopen
+/// skips.
+fn closedWindowCountExcept(alloc: std.mem.Allocator, skip: []const u8) usize {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const path = resume_core.closedPath(arena.allocator(), std.posix.getenv("XDG_STATE_HOME"), std.posix.getenv("HOME")) orelse return 0;
+    var n: usize = 0;
+    for (resume_core.loadClosed(arena.allocator(), path).windows) |w| {
+        if (!std.mem.eql(u8, w.project, skip)) n += 1;
+    }
+    return n;
+}
+
+/// Run this binary's `roost <args>` in the background, detached (`setsid`),
+/// so it outlives this window: `roost close --all` closes the window it was
+/// started from last, which it finds through our `ROOST_SOCK`. argv[0], not
+/// /proc/self/exe, which points at a deleted file after a rebuild.
+fn runRoostCli(alloc: std.mem.Allocator, args: []const []const u8) void {
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(alloc);
+    argv.appendSlice(alloc, &.{ "/bin/sh", "-c", "setsid \"$@\" </dev/null >/dev/null 2>&1 &", "sh", std.mem.span(std.os.argv[0]) }) catch return;
+    argv.appendSlice(alloc, args) catch return;
+    var child = std.process.Child.init(argv.items, alloc);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch |err| {
+        log.warn("could not run roost {s}: {}", .{ args[0], err });
+        return;
+    };
+    log.info("started roost {s}", .{args[0]});
+}
+
+/// Close every Roost window, this one last. Each saves its layout and
+/// conversations, and the list is saved for reopening.
+fn closeAllWindows(a: *AppContext) void {
+    runRoostCli(a.alloc, &.{ "close", "--all", "--yes" });
+}
+
+/// `win.close-all` (Ctrl+Shift+Alt+Q): list the windows, then ask. The list
+/// comes from `roost status --all`, run asynchronously, because this window
+/// answers it too and must keep its loop running meanwhile.
+fn onCloseAll(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    const argv = [_:null]?[*:0]const u8{ std.os.argv[0], "status", "--all", "--json" };
+    var gerr: ?*glib.Error = null;
+    const proc = gio.Subprocess.newv(@ptrCast(&argv), .{ .stdout_pipe = true, .stderr_silence = true }, &gerr) orelse {
+        if (gerr) |e| e.free();
+        return presentCloseAll(a, "");
+    };
+    proc.communicateUtf8Async(null, null, onCloseAllStatus, a);
+}
+
+fn onCloseAllStatus(source: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return));
+    const proc = gobject.ext.cast(gio.Subprocess, source orelse return) orelse return;
+    defer proc.unref();
+    var stdout: ?[*:0]u8 = null;
+    var gerr: ?*glib.Error = null;
+    _ = proc.communicateUtf8Finish(res, @ptrCast(&stdout), null, &gerr);
+    defer if (stdout) |o| glib.free(o);
+    defer if (gerr) |e| e.free();
+    presentCloseAll(a, if (stdout) |o| std.mem.span(o) else "");
+}
+
+/// The close-all confirmation, listing the windows from `status_json` (empty
+/// when the list couldn't be read). Cancel is the default.
+fn presentCloseAll(a: *AppContext, status_json: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(a.alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const Reply = struct { windows: []const control.Status = &.{} };
+    const windows: []const control.Status = if (std.json.parseFromSliceLeaky(Reply, ar, std.mem.trim(u8, status_json, " \t\r\n"), .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    })) |r| r.windows else |_| &.{};
+
+    var body: std.Io.Writer.Allocating = .init(ar);
+    const w = &body.writer;
+    w.writeAll("Each window saves its layout and Claude conversations as it closes.") catch {};
+    if (windows.len > 0) w.writeAll("\n") catch {};
+    for (windows) |win| {
+        const name = if (win.name.len > 0) win.name else "an older Roost window";
+        w.print("\n• {s}", .{name}) catch {};
+        if (win.branch.len > 0) w.print(" · {s}", .{win.branch}) catch {};
+        switch (win.state) {
+            .working => w.writeAll(" — agent working") catch {},
+            .needs_input => w.writeAll(" — agent needs you") catch {},
+            else => {},
+        }
+    }
+    w.writeAll("\n\nReopen them from the window menu, the project chooser (Ctrl+O), the bar, or by starting Roost from the launcher.") catch {};
+    const body_z = ar.dupeZ(u8, body.written()) catch return;
+
+    var heading_buf: [64]u8 = undefined;
+    const heading = if (windows.len > 1)
+        std.fmt.bufPrintZ(&heading_buf, "Close All {d} Roost Windows?", .{windows.len}) catch "Close All Roost Windows?"
+    else
+        "Close All Roost Windows?";
+    const dialog = adw.AlertDialog.new(heading, body_z);
+    dialog.addResponse("cancel", "Cancel");
+    dialog.addResponse("closeall", "Close All");
+    dialog.setResponseAppearance("closeall", .destructive);
+    dialog.setDefaultResponse("cancel");
+    dialog.setCloseResponse("cancel");
+    dialog.choose(a.window.as(gtk.Widget), null, onCloseAllResponse, a);
+}
+
+fn onCloseAllResponse(source: ?*gobject.Object, res: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const a: *AppContext = @ptrCast(@alignCast(data orelse return));
+    const dialog = gobject.ext.cast(adw.AlertDialog, source orelse return) orelse return;
+    if (std.mem.orderZ(u8, "closeall", dialog.chooseFinish(res)) == .eq) closeAllWindows(a);
+}
+
+/// `win.reopen-closed`: open every window `roost close --all` saved that
+/// isn't open, each on its old workspace.
+fn onReopenClosed(_: *gio.SimpleAction, _: ?*glib.Variant, a: *AppContext) callconv(.c) void {
+    runRoostCli(a.alloc, &.{"reopen"});
+}
+
+/// The window menu is opening: Reopen is only live when there's a saved list.
+fn onWindowMenuShow(_: *gtk.Widget, a: *AppContext) callconv(.c) void {
+    const action = a.window.as(gio.ActionMap).lookupAction("reopen-closed") orelse return;
+    const simple = gobject.ext.cast(gio.SimpleAction, action) orelse return;
+    simple.setEnabled(@intFromBool(closedWindowCountExcept(a.alloc, a.current.path) > 0));
+}
+
+/// Accept handler for the quit confirmation: authorize the close and re-issue/// Accept handler for the quit confirmation: authorize the close and re-issue
 /// it. The re-issued close-request sees `quit_confirmed` and tears down.
 fn doQuit(a: *AppContext) void {
     a.quit_confirmed = true;
@@ -1097,6 +1282,11 @@ fn setupShortcuts(
     // Reload: restart into the latest built binary (Ctrl+Shift+Q).
     addAction(map, "reload", onReload, app_ctx);
 
+    // Close every Roost window, saving them for reopen (Ctrl+Shift+Alt+Q),
+    // and bring them back (the window menu).
+    addAction(map, "close-all", onCloseAll, app_ctx);
+    addAction(map, "reopen-closed", onReopenClosed, app_ctx);
+
     // Open the project/worktree chooser (Ctrl+O). App-level (on the GApplication,
     // not the window) so a remote second desktop launch can forward to it.
     addAction(gtk_app.as(gio.Application).as(gio.ActionMap), "present-chooser", onPresentChooser, app_ctx);
@@ -1196,6 +1386,7 @@ fn setupShortcuts(
     // but our window accelerator wins over the terminal surface (same as the
     // add-pane chords). Run ./build.sh first; reload only swaps the process.
     setAccel(gtk_app, "win.reload", "<Ctrl><Shift>Q");
+    setAccel(gtk_app, "win.close-all", "<Ctrl><Shift><Alt>Q");
 
     // Quit: Ctrl+Q reuses the existing `win.close` action (clean shutdown +
     // layout save, both via onWindowCloseRequest).
@@ -1909,6 +2100,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Shift+M", .text = "Toggle focus-follows-mouse (on by default)" },
     .{ .keys = "Ctrl+Shift+/", .text = "Show this cheat-sheet" },
     .{ .keys = "Ctrl+Shift+Q", .text = "Reload — restart into the latest build; Claude resumes" },
+    .{ .keys = "Ctrl+Shift+Alt+Q", .text = "Close all windows, to reopen them later" },
     .{ .keys = "Ctrl+Q", .text = "Quit Roost" },
 };
 
@@ -3697,6 +3889,13 @@ fn presentChooser(a: *AppContext) void {
     dialog.addResponse("newwin", "New Window");
     dialog.addResponse("open", "Open Folder…");
     dialog.addResponse("new", "New Worktree…");
+    // After `roost close --all`: bring them all back. Never the default.
+    const closed = closedWindowCountExcept(alloc, cur);
+    if (closed > 0) {
+        var label_buf: [64]u8 = undefined;
+        const label = std.fmt.bufPrintZ(&label_buf, "Reopen {d} Closed Window{s}", .{ closed, if (closed == 1) "" else "s" }) catch "Reopen Closed Windows";
+        dialog.addResponse("reopen", label);
+    }
     dialog.addResponse("cancel", "Cancel");
     dialog.setCloseResponse("cancel");
 
@@ -3778,5 +3977,7 @@ fn onChooserResponse(
         presentFolderPicker(a);
     } else if (std.mem.orderZ(u8, "new", resp) == .eq) {
         beginCreateWorktree(a, true);
+    } else if (std.mem.orderZ(u8, "reopen", resp) == .eq) {
+        runRoostCli(a.alloc, &.{"reopen"});
     }
 }

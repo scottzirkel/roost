@@ -73,6 +73,13 @@ pub const Closed = struct {
     }
 };
 
+/// The saved list at `path`, or an empty one when there's none or it can't
+/// be read. Allocations live in `arena`.
+pub fn loadClosed(arena: Allocator, path: []const u8) Closed {
+    const text = std.fs.cwd().readFileAlloc(arena, path, 1024 * 1024) catch return .{};
+    return Closed.parse(arena, text) catch .{};
+}
+
 /// Where `Closed` is kept: `$XDG_STATE_HOME/roost/closed-windows.json`, else
 /// under `~/.local/state`. In state, not runtime, so it survives a reboot.
 pub fn closedPath(arena: Allocator, state_home: ?[]const u8, home: ?[]const u8) ?[]const u8 {
@@ -137,6 +144,21 @@ test "closed: round-trips, reads the first format, and tolerates newer fields" {
     const newer = try Closed.parse(a, "{\"windows\":[{\"project\":\"/p\",\"monitor\":\"DP-1\"}],\"version\":2}");
     try testing.expectEqualStrings("/p", newer.windows[0].project);
     try testing.expectEqual(@as(usize, 0), (try Closed.parse(a, "{}")).windows.len);
+}
+
+test "loadClosed: the file's windows, or none" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(.{ .sub_path = "c.json", .data = "{\"windows\":[{\"project\":\"/p\"}]}" });
+    try tmp.dir.writeFile(.{ .sub_path = "bad.json", .data = "nope" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &buf);
+    try testing.expectEqual(@as(usize, 1), loadClosed(a, try std.fs.path.join(a, &.{ dir, "c.json" })).windows.len);
+    try testing.expectEqual(@as(usize, 0), loadClosed(a, try std.fs.path.join(a, &.{ dir, "bad.json" })).windows.len);
+    try testing.expectEqual(@as(usize, 0), loadClosed(a, try std.fs.path.join(a, &.{ dir, "none.json" })).windows.len);
 }
 
 test "closedPath: XDG_STATE_HOME, else ~/.local/state" {

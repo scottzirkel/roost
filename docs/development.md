@@ -103,7 +103,18 @@ A good isolated instance:
 - **Leaves real notes alone.** Set `scratchpad-path` and
   `scratchpad-autosave = false` in `<scratch config>/roost/config`.
 - **Picks its project and agent** with `ROOST_PROJECT` and `ROOST_AGENT`, and
-  unsets any inherited `ROOST_SOCK` and `ROOST_PANE`.
+  unsets any inherited `ROOST_SOCK` and `ROOST_PANE`. Every Roost pane exports
+  `ROOST_PROJECT`, so a test that leaves it unset on purpose (a simulated
+  desktop launch: `GIO_LAUNCHED_DESKTOP_FILE_PID` set to the process's own
+  pid) must `unset ROOST_PROJECT`. Otherwise the test opens a real window on
+  the user's project, and the window rule, which matches the test title,
+  doesn't hide it.
+- **Never pops up a dialog.** Roost's dialogs open as their own windows, class
+  `GTK Application`, which the test window's rule doesn't catch. A dialog a
+  test triggers (through `org.gtk.Actions` on the private bus, say) shows on
+  the user's screen and takes their typing. Before triggering one, switch on
+  a rule for that dialog's title, sending it to the test's special workspace,
+  and switch it off right after.
 - **Has its own runtime folder when testing `roost close --all`.** The CLI
   finds windows by their sockets in `$XDG_RUNTIME_DIR`, so in the real one
   it would close the user's windows too. Set `XDG_RUNTIME_DIR` to a short

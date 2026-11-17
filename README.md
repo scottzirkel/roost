@@ -183,7 +183,16 @@ which report the conversation.
 ### Closing and reopening every window
 
 To restart with several windows open, close them all at once and bring them
-back the same way:
+back the same way. In any Roost window, `Ctrl+Shift+Alt+Q` (or **Close All
+Windows…** in the window menu, ☰) lists the windows and asks. The Quit dialog
+(`Ctrl+Q`) offers **Close All Windows** too, next to Quit.
+
+To bring them back, start Roost from the desktop launcher: with no Roost
+window open, it reopens them all instead of only your last project. With a
+window open, use **Reopen Closed Windows** in the window menu, or **Reopen N
+Closed Windows** in the project chooser (`Ctrl+O`). On Omarchy, the bar
+widget's list has both buttons, and it stays on the bar while there are
+windows to reopen. From a terminal:
 
 ```sh
 roost close --all      # lists the windows, asks, then closes them all
@@ -251,7 +260,9 @@ and moves it there without taking focus from the pane you're typing in.
 On Omarchy, Roost can add a widget to the bar: 󱗆, plus how many windows have
 an agent that needs you (󰂚), is working (●) or is done (✓). Left-click it to
 list every Roost window with its project, branch and state, then click one to
-jump to it. Right-click jumps straight to the window that needs you.
+jump to it. Right-click jumps straight to the window that needs you. The list
+also has **Close all windows** (click twice) and **Reopen N closed windows**;
+after a close-all the widget shows ↺ and the count until you reopen.
 
 ```sh
 scripts/install-omarchy-widget.sh                           # add it to the bar
@@ -285,6 +296,7 @@ Any other bar can run `roost status --all --watch` and read its JSON lines.
 | `Ctrl+,` | Open Settings |
 | `Ctrl+Shift+/` | Show the keyboard cheat-sheet |
 | `Ctrl+Shift+Q` | Reload — restart into the latest build; Claude resumes its conversation |
+| `Ctrl+Shift+Alt+Q` | Close every Roost window, saving them to reopen later |
 | `Ctrl+Q` | Quit (saves the layout) |
 
 > Note: shifted-digit accelerators don't fire in GTK, which is why splits/roles
