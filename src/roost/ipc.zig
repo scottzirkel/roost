@@ -38,9 +38,11 @@
 const std = @import("std");
 const posix = std.posix;
 
+const gdk = @import("gdk");
 const gio = @import("gio");
 const glib = @import("glib");
 const gobject = @import("gobject");
+const gtk = @import("gtk");
 
 const Application = @import("../apprt/gtk/class/application.zig").Application;
 const internal_os = @import("../os/main.zig");
@@ -487,8 +489,7 @@ pub const Server = struct {
 /// (agent events, id "roost-agent") and the wired-actions runner (action
 /// results, id "roost-action"); a distinct `id` keeps action popups from
 /// replacing agent ones (and vice-versa). `body` may be any slice (copied
-/// NUL-terminated). The icon is the agent's `claude-desktop` with our app id as
-/// a fallback — same lookup that makes Ghostty's own icon render under mako.
+/// NUL-terminated). The icon comes from `notifyIconName`.
 pub fn notifyApp(gio_app: *gio.Application, id: [*:0]const u8, title: [:0]const u8, body: []const u8) void {
     var body_buf: [1024]u8 = undefined;
     const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{body}) catch body_buf[0..0 :0];
@@ -497,12 +498,31 @@ pub fn notifyApp(gio_app: *gio.Application, id: [*:0]const u8, title: [:0]const 
     defer notification.unref();
     notification.setBody(body_z);
 
-    const icon = gio.ThemedIcon.new("claude-desktop");
+    const icon = gio.ThemedIcon.new(notifyIconName());
     defer icon.unref();
-    icon.appendName("dev.scottzirkel.Roost");
     notification.setIcon(icon.as(gio.Icon));
 
     gio_app.sendNotification(id, notification);
+}
+
+/// Icon names for a notification, best first: the agent's logo, which the
+/// Claude Desktop package installs as `claude-desktop`, then Roost's own
+/// (`scripts/install-icon.sh`). The last one is the default.
+const notify_icons = [_][:0]const u8{ "claude-desktop", "dev.scottzirkel.Roost" };
+
+/// The first `notify_icons` name the icon theme has. We pick it here because
+/// GIO sends only a ThemedIcon's FIRST name to the notification daemon, so an
+/// appended fallback never arrives. A name the daemon can't find shows up as
+/// a "?" tile in the Omarchy shell, since GIO also sends an empty app name.
+/// Runs on the main thread, like every caller of `notifyApp`.
+fn notifyIconName() [:0]const u8 {
+    const fallback = notify_icons[notify_icons.len - 1];
+    const display = gdk.Display.getDefault() orelse return fallback;
+    const theme = gtk.IconTheme.getForDisplay(display);
+    for (notify_icons[0 .. notify_icons.len - 1]) |name| {
+        if (theme.hasIcon(name) != 0) return name;
+    }
+    return fallback;
 }
 
 /// Build the socket path: `${XDG_RUNTIME_DIR}/roost-<pid>.sock`, falling back
