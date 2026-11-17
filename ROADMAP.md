@@ -34,11 +34,13 @@ into the agent.
   Save each Agent pane's session in the project's layout file. On the next
   open, offer to resume them or start fresh. This matters more while the
   NVIDIA close crash keeps happening (see Known issues).
-- **Hold text meant for a busy agent.** A failed action types its output into
-  the Agent pane right away, even while Claude shows a permission prompt,
-  where a stray key can pick an answer. Hold the text until the agent is done
-  or idle, and show in the header that it's waiting. Never hold your own
-  typing.
+- **Hold text meant for a busy agent.** A failed action pastes its output into
+  the Agent pane right away. If Claude is showing a permission prompt, Claude
+  Code throws the paste away, so the failure never reaches the conversation.
+  It can't answer the prompt, because Roost pastes with bracketed paste and
+  the prompt ignores pastes (probed with Claude Code on 2026-11-17). Hold the
+  text until the agent is done or idle, and show in the header that it's
+  waiting. Never hold your own typing.
 - **Services: actions that keep running.** Mark an action as a service
   (`"service": true`), such as `npm run dev` or `php artisan queue:listen`. It
   starts with the window, restarts if it crashes, shows its state in the
