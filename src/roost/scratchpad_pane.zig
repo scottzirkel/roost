@@ -101,6 +101,7 @@ pub const ScratchpadPane = struct {
         // Base font comes from CSS (`.roost-scratchpad`, built from config in
         // app.zig); the default there is monospace, so we drop setMonospace.
         text_view.as(gtk.Widget).addCssClass("roost-scratchpad");
+        addTerminalClipboardKeys(text_view);
 
         const buffer = text_view.getBuffer();
         const tags = buildTags(buffer);
@@ -130,6 +131,28 @@ pub const ScratchpadPane = struct {
             .path = owned_path,
             .autosave = autosave,
         };
+    }
+
+    /// Copy and paste with the terminal keys too: Ctrl+Shift+C and Ctrl+Shift+V.
+    ///
+    /// A Roost window holds terminals, so a desktop treats the whole window as
+    /// one. Omarchy's universal copy/paste (Super+C, Super+V) then sends a
+    /// terminal window Ctrl+Shift+C/V, not Ctrl+C/V, and a GTK text view knows
+    /// only the latter. Bound to the view's own `clipboard.*` actions, both
+    /// cases of the letter, since Shift can deliver either keyval.
+    fn addTerminalClipboardKeys(view: *gtk.TextView) void {
+        const ctrl = gtk.ShortcutController.new();
+        const keys = [_][2][*:0]const u8{
+            .{ "<Control><Shift>c", "clipboard.copy" },
+            .{ "<Control><Shift>C", "clipboard.copy" },
+            .{ "<Control><Shift>v", "clipboard.paste" },
+            .{ "<Control><Shift>V", "clipboard.paste" },
+        };
+        for (keys) |k| {
+            const trigger = gtk.ShortcutTrigger.parseString(k[0]) orelse continue;
+            ctrl.addShortcut(gtk.Shortcut.new(trigger, gtk.NamedAction.new(k[1]).as(gtk.ShortcutAction)));
+        }
+        view.as(gtk.Widget).addController(ctrl.as(gtk.EventController));
     }
 
     /// Connect signals. MUST be called only once the pane sits at its final

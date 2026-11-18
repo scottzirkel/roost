@@ -463,6 +463,11 @@ Services are wired actions with `"service": true` that keep running
   current libadwaita it reports success and returns black.
 - Each project's notes autosave to `<project>/.roost/scratchpad.md`, at most a
   second after a change, and again when the pane closes.
+- **Ctrl+Shift+C and Ctrl+Shift+V copy and paste** in it as well as Ctrl+C
+  and Ctrl+V. A desktop sees the whole Roost window as a terminal, and
+  Omarchy's universal copy/paste (Super+C, Super+V) sends a terminal those
+  keys, which a `GtkTextView` doesn't know. A shortcut controller maps them
+  to the view's own `clipboard.copy` and `clipboard.paste`.
 
 ## macOS
 
